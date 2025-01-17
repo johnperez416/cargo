@@ -3,11 +3,14 @@ use std::fmt::{self, Debug, Formatter};
 use std::path::{Path, PathBuf};
 use std::task::Poll;
 
-use crate::core::source::MaybePackage;
-use crate::core::{Dependency, Package, PackageId, QueryKind, Source, SourceId, Summary};
+use crate::core::{Dependency, Package, PackageId, SourceId};
+use crate::sources::source::MaybePackage;
+use crate::sources::source::QueryKind;
+use crate::sources::source::Source;
+use crate::sources::IndexSummary;
 use crate::sources::PathSource;
 use crate::util::errors::CargoResult;
-use crate::util::Config;
+use crate::util::GlobalContext;
 
 use anyhow::Context as _;
 use cargo_util::{paths, Sha256};
@@ -51,14 +54,14 @@ use serde::Deserialize;
 /// └── no-checksum-so-fails-the-entire-source-reading/
 ///    └── Cargo.toml
 /// ```
-pub struct DirectorySource<'cfg> {
+pub struct DirectorySource<'gctx> {
     /// The unique identifier of this source.
     source_id: SourceId,
     /// The root path of this source.
     root: PathBuf,
     /// Packages that this sources has discovered.
     packages: HashMap<PackageId, (Package, Checksum)>,
-    config: &'cfg Config,
+    gctx: &'gctx GlobalContext,
     updated: bool,
 }
 
@@ -67,6 +70,7 @@ pub struct DirectorySource<'cfg> {
 /// The file name is simply `.cargo-checksum.json`. The checksum algorithm as
 /// of now is SHA256.
 #[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
 struct Checksum {
     /// Checksum of the package. Normally it is computed from the `.crate` file.
     package: Option<String>,
@@ -74,41 +78,42 @@ struct Checksum {
     files: HashMap<String, String>,
 }
 
-impl<'cfg> DirectorySource<'cfg> {
-    pub fn new(path: &Path, id: SourceId, config: &'cfg Config) -> DirectorySource<'cfg> {
+impl<'gctx> DirectorySource<'gctx> {
+    pub fn new(path: &Path, id: SourceId, gctx: &'gctx GlobalContext) -> DirectorySource<'gctx> {
         DirectorySource {
             source_id: id,
             root: path.to_path_buf(),
-            config,
+            gctx,
             packages: HashMap::new(),
             updated: false,
         }
     }
 }
 
-impl<'cfg> Debug for DirectorySource<'cfg> {
+impl<'gctx> Debug for DirectorySource<'gctx> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "DirectorySource {{ root: {:?} }}", self.root)
     }
 }
 
-impl<'cfg> Source for DirectorySource<'cfg> {
+impl<'gctx> Source for DirectorySource<'gctx> {
     fn query(
         &mut self,
         dep: &Dependency,
         kind: QueryKind,
-        f: &mut dyn FnMut(Summary),
+        f: &mut dyn FnMut(IndexSummary),
     ) -> Poll<CargoResult<()>> {
         if !self.updated {
             return Poll::Pending;
         }
         let packages = self.packages.values().map(|p| &p.0);
         let matches = packages.filter(|pkg| match kind {
-            QueryKind::Exact => dep.matches(pkg.summary()),
-            QueryKind::Fuzzy => true,
+            QueryKind::Exact | QueryKind::RejectedVersions => dep.matches(pkg.summary()),
+            QueryKind::AlternativeNames => true,
+            QueryKind::Normalized => dep.matches(pkg.summary()),
         });
         for summary in matches.map(|pkg| pkg.summary().clone()) {
-            f(summary);
+            f(IndexSummary::Candidate(summary));
         }
         Poll::Ready(Ok(()))
     }
@@ -169,8 +174,8 @@ impl<'cfg> Source for DirectorySource<'cfg> {
                 continue;
             }
 
-            let mut src = PathSource::new(&path, self.source_id, self.config);
-            src.update()?;
+            let mut src = PathSource::new(&path, self.source_id, self.gctx);
+            src.load()?;
             let mut pkg = src.root_package()?;
 
             let cksum_file = path.join(".cargo-checksum.json");
@@ -221,9 +226,8 @@ impl<'cfg> Source for DirectorySource<'cfg> {
     }
 
     fn verify(&self, id: PackageId) -> CargoResult<()> {
-        let (pkg, cksum) = match self.packages.get(&id) {
-            Some(&(ref pkg, ref cksum)) => (pkg, cksum),
-            None => anyhow::bail!("failed to find entry for `{}` in directory source", id),
+        let Some((pkg, cksum)) = self.packages.get(&id) else {
+            anyhow::bail!("failed to find entry for `{}` in directory source", id);
         };
 
         for (file, cksum) in cksum.files.iter() {

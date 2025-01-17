@@ -1,12 +1,14 @@
 //! Tests for the new feature resolver.
 
+use std::fs::File;
+
 use cargo_test_support::cross_compile::{self, alternate};
-use cargo_test_support::install::cargo_home;
-use cargo_test_support::paths::CargoPathExt;
+use cargo_test_support::paths;
+use cargo_test_support::prelude::*;
 use cargo_test_support::publish::validate_crate_contents;
 use cargo_test_support::registry::{Dependency, Package};
+use cargo_test_support::str;
 use cargo_test_support::{basic_manifest, cargo_process, project, rustc_host, Project};
-use std::fs::File;
 
 /// Switches Cargo.toml to use `resolver = "2"`.
 pub fn switch_to_resolver_2(p: &Project) {
@@ -54,6 +56,7 @@ fn inactivate_targets() {
             [package]
             name = "foo"
             version = "0.1.0"
+            edition = "2015"
 
             [dependencies]
             common = "1.0"
@@ -65,7 +68,14 @@ fn inactivate_targets() {
 
     p.cargo("check")
         .with_status(101)
-        .with_stderr_contains("[..]f1 should not activate[..]")
+        .with_stderr_data(
+            str![[r#"
+...
+[ERROR] f1 should not activate
+...
+"#]]
+            .unordered(),
+        )
         .run();
 
     switch_to_resolver_2(&p);
@@ -134,6 +144,7 @@ fn inactive_target_optional() {
             [package]
             name = "dep1"
             version = "0.1.0"
+            edition = "2015"
 
             [dependencies]
             common = {version="1.0", features=["f1"]}
@@ -152,6 +163,7 @@ fn inactive_target_optional() {
             [package]
             name = "dep2"
             version = "0.1.0"
+            edition = "2015"
 
             [dependencies]
             common = "1.0"
@@ -167,29 +179,85 @@ fn inactive_target_optional() {
         .build();
 
     p.cargo("run --all-features")
-        .with_stdout("foo1\nfoo2\ndep1\ndep2\ncommon\nf1\nf2\nf3\nf4\n")
+        .with_stdout_data(str![[r#"
+foo1
+foo2
+dep1
+dep2
+common
+f1
+f2
+f3
+f4
+
+"#]])
         .run();
     p.cargo("run --features dep1")
-        .with_stdout("dep1\nf1\n")
+        .with_stdout_data(str![[r#"
+dep1
+f1
+
+"#]])
         .run();
     p.cargo("run --features foo1")
-        .with_stdout("foo1\ndep1\nf1\nf2\n")
+        .with_stdout_data(str![[r#"
+foo1
+dep1
+f1
+f2
+
+"#]])
         .run();
     p.cargo("run --features dep2")
-        .with_stdout("dep2\nf3\n")
+        .with_stdout_data(str![[r#"
+dep2
+f3
+
+"#]])
         .run();
     p.cargo("run --features common")
-        .with_stdout("common\nf4\n")
+        .with_stdout_data(str![[r#"
+common
+f4
+
+"#]])
         .run();
 
     switch_to_resolver_2(&p);
     p.cargo("run --all-features")
-        .with_stdout("foo1\nfoo2\ndep1\ndep2\ncommon")
+        .with_stdout_data(str![[r#"
+foo1
+foo2
+dep1
+dep2
+common
+
+"#]])
         .run();
-    p.cargo("run --features dep1").with_stdout("dep1\n").run();
-    p.cargo("run --features foo1").with_stdout("foo1\n").run();
-    p.cargo("run --features dep2").with_stdout("dep2\n").run();
-    p.cargo("run --features common").with_stdout("common").run();
+    p.cargo("run --features dep1")
+        .with_stdout_data(str![[r#"
+dep1
+
+"#]])
+        .run();
+    p.cargo("run --features foo1")
+        .with_stdout_data(str![[r#"
+foo1
+
+"#]])
+        .run();
+    p.cargo("run --features dep2")
+        .with_stdout_data(str![[r#"
+dep2
+
+"#]])
+        .run();
+    p.cargo("run --features common")
+        .with_stdout_data(str![[r#"
+common
+
+"#]])
+        .run();
 }
 
 #[cargo_test]
@@ -211,6 +279,7 @@ fn itarget_proc_macro() {
             [package]
             name = "foo"
             version = "0.1.0"
+            edition = "2015"
 
             [dependencies]
             pm = "1.0"
@@ -275,7 +344,11 @@ fn decouple_host_deps() {
 
     p.cargo("check")
         .with_status(101)
-        .with_stderr_contains("[..]unresolved import `common::bar`[..]")
+        .with_stderr_data(str![[r#"
+...
+error[E0432]: unresolved import `common::bar`
+...
+"#]])
         .run();
 
     switch_to_resolver_2(&p);
@@ -339,7 +412,11 @@ fn decouple_host_deps_nested() {
 
     p.cargo("check")
         .with_status(101)
-        .with_stderr_contains("[..]unresolved import `common::bar`[..]")
+        .with_stderr_data(str![[r#"
+...
+error[E0432]: unresolved import `common::bar`
+...
+"#]])
         .run();
 
     switch_to_resolver_2(&p);
@@ -494,7 +571,7 @@ fn build_script_runtime_features() {
                 if is_set("CARGO_FEATURE_BUILD") {
                     res |= 4;
                 }
-                println!("cargo:rustc-cfg=RunCustomBuild=\"{}\"", res);
+                println!("cargo::rustc-cfg=RunCustomBuild=\"{}\"", res);
 
                 let mut res = 0;
                 if cfg!(feature = "normal") {
@@ -506,7 +583,7 @@ fn build_script_runtime_features() {
                 if cfg!(feature = "build") {
                     res |= 4;
                 }
-                println!("cargo:rustc-cfg=CustomBuild=\"{}\"", res);
+                println!("cargo::rustc-cfg=CustomBuild=\"{}\"", res);
             }
             "#,
         )
@@ -562,7 +639,7 @@ fn build_script_runtime_features() {
             r#"
             fn main() {
                 assert_eq!(common::foo(), common::build_time());
-                println!("cargo:rustc-cfg=from_build=\"{}\"", common::foo());
+                println!("cargo::rustc-cfg=from_build=\"{}\"", common::foo());
             }
             "#,
         )
@@ -819,6 +896,7 @@ fn required_features_host_dep() {
             [package]
             name = "bdep"
             version = "0.1.0"
+            edition = "2015"
 
             [features]
             f1 = []
@@ -829,12 +907,12 @@ fn required_features_host_dep() {
 
     p.cargo("run")
         .with_status(101)
-        .with_stderr(
-            "\
+        .with_stderr_data(str![[r#"
+[LOCKING] 1 package to latest compatible version
 [ERROR] target `x` in package `foo` requires the features: `bdep/f1`
-Consider enabling them by passing, e.g., `--features=\"bdep/f1\"`
-",
-        )
+Consider enabling them by passing, e.g., `--features="bdep/f1"`
+
+"#]])
         .run();
 
     // New behavior.
@@ -909,7 +987,12 @@ fn disabled_shared_host_dep() {
         )
         .build();
 
-    p.cargo("run -v").with_stdout("hello from somedep").run();
+    p.cargo("run -v")
+        .with_stdout_data(str![[r#"
+hello from somedep
+
+"#]])
+        .run();
 }
 
 #[cargo_test]
@@ -922,6 +1005,7 @@ fn required_features_inactive_dep() {
             [package]
             name = "foo"
             version = "0.1.0"
+            edition = "2015"
             resolver = "2"
 
             [target.'cfg(whatever)'.dependencies]
@@ -940,10 +1024,20 @@ fn required_features_inactive_dep() {
         .file("bar/src/lib.rs", "")
         .build();
 
-    p.cargo("check").with_stderr("[FINISHED] [..]").run();
+    p.cargo("check")
+        .with_stderr_data(str![[r#"
+[LOCKING] 1 package to latest compatible version
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
 
     p.cargo("check --features=feat1")
-        .with_stderr("[CHECKING] foo[..]\n[FINISHED] [..]")
+        .with_stderr_data(str![[r#"
+[CHECKING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }
 
@@ -1018,12 +1112,15 @@ fn decouple_proc_macro() {
 
     p.cargo("run")
         .env("TEST_EXPECTS_ENABLED", "1")
-        .with_stdout("it is true")
+        .with_stdout_data(str![[r#"
+it is true
+
+"#]])
         .run();
     // Make sure the test is fallible.
     p.cargo("test --doc")
         .with_status(101)
-        .with_stdout_contains("[..]common is wrong[..]")
+        .with_stdout_data("...\n[..]common is wrong[..]\n...")
         .run();
     p.cargo("test --doc").env("TEST_EXPECTS_ENABLED", "1").run();
     p.cargo("doc").run();
@@ -1037,7 +1134,12 @@ fn decouple_proc_macro() {
 
     // New behavior.
     switch_to_resolver_2(&p);
-    p.cargo("run").with_stdout("it is false").run();
+    p.cargo("run")
+        .with_stdout_data(str![[r#"
+it is false
+
+"#]])
+        .run();
 
     p.cargo("test --doc").run();
     p.cargo("doc").run();
@@ -1073,6 +1175,7 @@ fn proc_macro_ws() {
             [package]
             name = "foo"
             version = "0.1.0"
+            edition = "2015"
 
             [features]
             feat1 = []
@@ -1085,6 +1188,7 @@ fn proc_macro_ws() {
             [package]
             name = "pm"
             version = "0.1.0"
+            edition = "2015"
 
             [lib]
             proc-macro = true
@@ -1097,7 +1201,11 @@ fn proc_macro_ws() {
         .build();
 
     p.cargo("check -p pm -v")
-        .with_stderr_contains("[RUNNING] `rustc --crate-name foo [..]--cfg[..]feat1[..]")
+        .with_stderr_data(str![[r#"
+...
+[RUNNING] `rustc --crate-name foo [..]--cfg[..]feat1[..]`
+...
+"#]])
         .run();
     // This may be surprising that `foo` doesn't get built separately. It is
     // because pm might have other units (binaries, tests, etc.), and so the
@@ -1105,18 +1213,20 @@ fn proc_macro_ws() {
     // is related to the bigger issue where the features selected in a
     // workspace depend on which packages are selected.
     p.cargo("check --workspace -v")
-        .with_stderr(
-            "\
-[FRESH] foo v0.1.0 [..]
-[FRESH] pm v0.1.0 [..]
-[FINISHED] dev [..]
-",
-        )
+        .with_stderr_data(str![[r#"
+[FRESH] foo v0.1.0 ([ROOT]/foo/foo)
+[FRESH] pm v0.1.0 ([ROOT]/foo/pm)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
     // Selecting just foo will build without unification.
     p.cargo("check -p foo -v")
         // Make sure `foo` is built without feat1
-        .with_stderr_line_without(&["[RUNNING] `rustc --crate-name foo"], &["--cfg[..]feat1"])
+        .with_stderr_line_without(
+            &["[RUNNING] `rustc --crate-name foo --edition=2015"],
+            &["--cfg[..]feat1"],
+        )
         .run();
 }
 
@@ -1131,6 +1241,7 @@ fn has_dev_dep_for_test() {
             [package]
             name = "foo"
             version = "0.1.0"
+            edition = "2015"
 
             [dev-dependencies]
             dep = { path = 'dep', features = ['f1'] }
@@ -1151,6 +1262,7 @@ fn has_dev_dep_for_test() {
             [package]
             name = "dep"
             version = "0.1.0"
+            edition = "2015"
 
             [features]
             f1 = []
@@ -1166,36 +1278,34 @@ fn has_dev_dep_for_test() {
         .build();
 
     p.cargo("check -v")
-        .with_stderr(
-            "\
-[CHECKING] foo v0.1.0 [..]
-[RUNNING] `rustc --crate-name foo [..]
-[FINISHED] [..]
-",
-        )
+        .with_stderr_data(str![[r#"
+[LOCKING] 1 package to latest compatible version
+[CHECKING] foo v0.1.0 ([ROOT]/foo)
+[RUNNING] `rustc --crate-name foo [..]`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
     p.cargo("check -v --profile=test")
-        .with_stderr(
-            "\
-[CHECKING] dep v0.1.0 [..]
-[RUNNING] `rustc --crate-name dep [..]
-[CHECKING] foo v0.1.0 [..]
-[RUNNING] `rustc --crate-name foo [..]
-[FINISHED] [..]
-",
-        )
+        .with_stderr_data(str![[r#"
+[CHECKING] dep v0.1.0 ([ROOT]/foo/dep)
+[RUNNING] `rustc --crate-name dep [..]`
+[CHECKING] foo v0.1.0 ([ROOT]/foo)
+[RUNNING] `rustc --crate-name foo [..]`
+[FINISHED] `test` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 
     // New resolver should not be any different.
     switch_to_resolver_2(&p);
     p.cargo("check -v --profile=test")
-        .with_stderr(
-            "\
-[FRESH] dep [..]
-[FRESH] foo [..]
-[FINISHED] [..]
-",
-        )
+        .with_stderr_data(str![[r#"
+[FRESH] dep v0.1.0 ([ROOT]/foo/dep)
+[FRESH] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `test` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }
 
@@ -1232,6 +1342,7 @@ fn build_dep_activated() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
 
                 # This should never be selected.
                 [target.'{}'.build-dependencies]
@@ -1267,6 +1378,7 @@ fn resolver_bad_setting() {
             [package]
             name = "foo"
             version = "0.1.0"
+            edition = "2015"
             resolver = "foo"
             "#,
         )
@@ -1275,14 +1387,13 @@ fn resolver_bad_setting() {
 
     p.cargo("check")
         .with_status(101)
-        .with_stderr(
-            "\
-error: failed to parse manifest at `[..]/foo/Cargo.toml`
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
 
 Caused by:
-  `resolver` setting `foo` is not valid, valid options are \"1\" or \"2\"
-",
-        )
+  `resolver` setting `foo` is not valid, valid options are "1" or "2"
+
+"#]])
         .run();
 }
 
@@ -1314,6 +1425,7 @@ fn resolver_original() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
                 resolver = "{}"
 
                 [dependencies]
@@ -1331,7 +1443,14 @@ fn resolver_original() {
 
     p.cargo("check")
         .with_status(101)
-        .with_stderr_contains("[..]f1 should not activate[..]")
+        .with_stderr_data(
+            str![[r#"
+...
+[ERROR] f1 should not activate
+...
+"#]]
+            .unordered(),
+        )
         .run();
 
     p.change_file("Cargo.toml", &manifest("2"));
@@ -1351,6 +1470,7 @@ fn resolver_not_both() {
             [package]
             name = "foo"
             version = "0.1.0"
+            edition = "2015"
             resolver = "2"
             "#,
         )
@@ -1359,14 +1479,13 @@ fn resolver_not_both() {
 
     p.cargo("check")
         .with_status(101)
-        .with_stderr(
-            "\
-error: failed to parse manifest at `[..]/foo/Cargo.toml`
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
 
 Caused by:
   cannot specify `resolver` field in both `[workspace]` and `[package]`
-",
-        )
+
+"#]])
         .run();
 }
 
@@ -1387,6 +1506,7 @@ fn resolver_ws_member() {
             [package]
             name = "a"
             version = "0.1.0"
+            edition = "2015"
             resolver = "2"
             "#,
         )
@@ -1394,15 +1514,14 @@ fn resolver_ws_member() {
         .build();
 
     p.cargo("check")
-        .with_stderr(
-            "\
-warning: resolver for the non root package will be ignored, specify resolver at the workspace root:
-package:   [..]/foo/a/Cargo.toml
-workspace: [..]/foo/Cargo.toml
-[CHECKING] a v0.1.0 [..]
-[FINISHED] [..]
-",
-        )
+        .with_stderr_data(str![[r#"
+[WARNING] resolver for the non root package will be ignored, specify resolver at the workspace root:
+package:   [ROOT]/foo/a/Cargo.toml
+workspace: [ROOT]/foo/Cargo.toml
+[CHECKING] a v0.1.0 ([ROOT]/foo/a)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }
 
@@ -1428,18 +1547,15 @@ fn edition_2021_workspace_member() {
         .file("a/src/lib.rs", "")
         .build();
 
-    p.cargo("check")
-        .with_stderr(
-            "\
-warning: virtual workspace defaulting to `resolver = \"1\"` despite one or more workspace members being on edition 2021 which implies `resolver = \"2\"`
-note: to keep the current resolver, specify `workspace.resolver = \"1\"` in the workspace root's manifest
-note: to use the edition 2021 resolver, specify `workspace.resolver = \"2\"` in the workspace root's manifest
-note: for more details see https://doc.rust-lang.org/cargo/reference/resolver.html#resolver-versions
-[CHECKING] a v0.1.0 [..]
-[FINISHED] [..]
-",
-        )
-        .run();
+    p.cargo("check").with_stderr_data(str![[r#"
+[WARNING] virtual workspace defaulting to `resolver = "1"` despite one or more workspace members being on edition 2021 which implies `resolver = "2"`
+[NOTE] to keep the current resolver, specify `workspace.resolver = "1"` in the workspace root's manifest
+[NOTE] to use the edition 2021 resolver, specify `workspace.resolver = "2"` in the workspace root's manifest
+[NOTE] for more details see https://doc.rust-lang.org/cargo/reference/resolver.html#resolver-versions
+[CHECKING] a v0.1.0 ([ROOT]/foo/a)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]]).run();
 }
 
 #[cargo_test]
@@ -1460,6 +1576,7 @@ fn resolver_ws_root_and_member() {
             [package]
             name = "a"
             version = "0.1.0"
+            edition = "2015"
             resolver = "2"
             "#,
         )
@@ -1468,12 +1585,11 @@ fn resolver_ws_root_and_member() {
 
     // Ignores if they are the same.
     p.cargo("check")
-        .with_stderr(
-            "\
-[CHECKING] a v0.1.0 [..]
-[FINISHED] [..]
-",
-        )
+        .with_stderr_data(str![[r#"
+[CHECKING] a v0.1.0 ([ROOT]/foo/a)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }
 
@@ -1554,6 +1670,7 @@ fn resolver_enables_new_features() {
             [package]
             name = "b"
             version = "0.1.0"
+            edition = "2015"
 
             [features]
             ping = []
@@ -1574,17 +1691,17 @@ fn resolver_enables_new_features() {
     // Only normal.
     p.cargo("run --bin a")
         .env("EXPECTED_FEATS", "1")
-        .with_stderr(
-            "\
-[UPDATING] [..]
+        .with_stderr_data(str![[r#"
+[UPDATING] `dummy-registry` index
+[LOCKING] 1 package to latest compatible version
 [DOWNLOADING] crates ...
-[DOWNLOADED] common [..]
+[DOWNLOADED] common v1.0.0 (registry `dummy-registry`)
 [COMPILING] common v1.0.0
-[COMPILING] a v0.1.0 [..]
-[FINISHED] [..]
+[COMPILING] a v0.1.0 ([ROOT]/foo/a)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `target/debug/a[EXE]`
-",
-        )
+
+"#]])
         .run();
 
     // only normal+dev
@@ -1593,7 +1710,10 @@ fn resolver_enables_new_features() {
     // Can specify features of packages from a different directory.
     p.cargo("run -p b --features=ping")
         .cwd("a")
-        .with_stdout("pong")
+        .with_stdout_data(str![[r#"
+pong
+
+"#]])
         .run();
 }
 
@@ -1620,6 +1740,7 @@ fn install_resolve_behavior() {
             [package]
             name = "foo"
             version = "1.0.0"
+            edition = "2015"
             resolver = "2"
 
             [target.'cfg(whatever)'.dependencies]
@@ -1654,6 +1775,7 @@ fn package_includes_resolve_behavior() {
             [package]
             name = "a"
             version = "0.1.0"
+            edition = "2015"
             authors = ["Zzz"]
             description = "foo"
             license = "MIT"
@@ -1665,26 +1787,47 @@ fn package_includes_resolve_behavior() {
 
     p.cargo("package").cwd("a").run();
 
-    let rewritten_toml = format!(
-        r#"{}
+    let rewritten_toml = str![[r##"
+# THIS FILE IS AUTOMATICALLY GENERATED BY CARGO
+#
+# When uploading crates to the registry Cargo will automatically
+# "normalize" Cargo.toml files for maximal compatibility
+# with all versions of Cargo and also rewrite `path` dependencies
+# to registry (e.g., crates.io) dependencies.
+#
+# If you are reading this file be aware that the original Cargo.toml
+# will likely look very different (and much more reasonable).
+# See Cargo.toml.orig for the original contents.
+
 [package]
+edition = "2015"
 name = "a"
 version = "0.1.0"
 authors = ["Zzz"]
+build = false
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
 description = "foo"
 homepage = "https://example.com/"
+readme = false
 license = "MIT"
 resolver = "2"
-"#,
-        cargo::core::package::MANIFEST_PREAMBLE
-    );
+
+[lib]
+name = "a"
+path = "src/lib.rs"
+
+"##]];
 
     let f = File::open(&p.root().join("target/package/a-0.1.0.crate")).unwrap();
     validate_crate_contents(
         f,
         "a-0.1.0.crate",
-        &["Cargo.toml", "Cargo.toml.orig", "src/lib.rs"],
-        &[("Cargo.toml", &rewritten_toml)],
+        &["Cargo.toml", "Cargo.toml.orig", "src/lib.rs", "Cargo.lock"],
+        [("Cargo.toml", rewritten_toml)],
     );
 }
 
@@ -1699,6 +1842,7 @@ fn tree_all() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
                 resolver = "2"
 
                 [target.'cfg(whatever)'.dependencies]
@@ -1708,12 +1852,11 @@ fn tree_all() {
         .file("src/lib.rs", "")
         .build();
     p.cargo("tree --target=all")
-        .with_stdout(
-            "\
-foo v0.1.0 ([..]/foo)
+        .with_stdout_data(str![[r#"
+foo v0.1.0 ([ROOT]/foo)
 └── log v0.4.8
-",
-        )
+
+"#]])
         .run();
 }
 
@@ -1742,6 +1885,7 @@ fn shared_dep_same_but_dependencies() {
                 [package]
                 name = "bin1"
                 version = "0.1.0"
+                edition = "2015"
 
                 [dependencies]
                 dep = { path = "../dep" }
@@ -1754,6 +1898,7 @@ fn shared_dep_same_but_dependencies() {
                 [package]
                 name = "bin2"
                 version = "0.1.0"
+                edition = "2015"
 
                 [build-dependencies]
                 dep = { path = "../dep" }
@@ -1768,6 +1913,7 @@ fn shared_dep_same_but_dependencies() {
                 [package]
                 name = "dep"
                 version = "0.1.0"
+                edition = "2015"
 
                 [dependencies]
                 subdep = { path = "../subdep" }
@@ -1783,6 +1929,7 @@ fn shared_dep_same_but_dependencies() {
                 [package]
                 name = "subdep"
                 version = "0.1.0"
+                edition = "2015"
 
                 [features]
                 feat = []
@@ -1792,8 +1939,8 @@ fn shared_dep_same_but_dependencies() {
             "subdep/src/lib.rs",
             r#"
                 pub fn feat_func() {
-                    #[cfg(feature = "feat")] println!("cargo:warning=feat: enabled");
-                    #[cfg(not(feature = "feat"))] println!("cargo:warning=feat: not enabled");
+                    #[cfg(feature = "feat")] println!("cargo::warning=feat: enabled");
+                    #[cfg(not(feature = "feat"))] println!("cargo::warning=feat: not enabled");
                 }
             "#,
         )
@@ -1801,32 +1948,39 @@ fn shared_dep_same_but_dependencies() {
 
     p.cargo("build --bin bin1 --bin bin2")
         // unordered because bin1 and bin2 build at the same time
-        .with_stderr_unordered(
-            "\
-[COMPILING] subdep [..]
-[COMPILING] dep [..]
-[COMPILING] bin2 [..]
-[COMPILING] bin1 [..]
-warning: feat: enabled
-[FINISHED] [..]
-",
+        .with_stderr_data(
+            str![[r#"
+[COMPILING] subdep v0.1.0 ([ROOT]/foo/subdep)
+[COMPILING] dep v0.1.0 ([ROOT]/foo/dep)
+[COMPILING] bin1 v0.1.0 ([ROOT]/foo/bin1)
+[COMPILING] bin2 v0.1.0 ([ROOT]/foo/bin2)
+[WARNING] bin2@0.1.0: feat: enabled
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]]
+            .unordered(),
         )
         .run();
     p.process(p.bin("bin1"))
-        .with_stdout("cargo:warning=feat: not enabled")
+        .with_stdout_data(str![[r#"
+cargo::warning=feat: not enabled
+
+"#]])
         .run();
 
     // Make sure everything stays cached.
     p.cargo("build -v --bin bin1 --bin bin2")
-        .with_stderr_unordered(
-            "\
-[FRESH] subdep [..]
-[FRESH] dep [..]
-[FRESH] bin1 [..]
-warning: feat: enabled
-[FRESH] bin2 [..]
-[FINISHED] [..]
-",
+        .with_stderr_data(
+            str![[r#"
+[FRESH] subdep v0.1.0 ([ROOT]/foo/subdep)
+[FRESH] dep v0.1.0 ([ROOT]/foo/dep)
+[FRESH] bin1 v0.1.0 ([ROOT]/foo/bin1)
+[WARNING] bin2@0.1.0: feat: enabled
+[FRESH] bin2 v0.1.0 ([ROOT]/foo/bin2)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]]
+            .unordered(),
         )
         .run();
 }
@@ -1847,6 +2001,7 @@ fn test_proc_macro() {
                 [package]
                 name = "runtime"
                 version = "0.1.0"
+                edition = "2015"
                 resolver = "2"
 
                 [dependencies]
@@ -1862,6 +2017,7 @@ fn test_proc_macro() {
                 [package]
                 name = "the-macro"
                 version = "0.1.0"
+                edition = "2015"
                 [lib]
                 proc-macro = true
                 test = false
@@ -1888,6 +2044,7 @@ fn test_proc_macro() {
                 [package]
                 name = "the-macro-support"
                 version = "0.1.0"
+                edition = "2015"
                 [dependencies]
                 shared = { path = "../shared" }
             "#,
@@ -1904,6 +2061,7 @@ fn test_proc_macro() {
                 [package]
                 name = "shared"
                 version = "0.1.0"
+                edition = "2015"
                 [features]
                 b = []
             "#,
@@ -1932,6 +2090,7 @@ fn doc_optional() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
                 resolver = "2"
 
                 [target.'cfg(whatever)'.dependencies]
@@ -1945,17 +2104,21 @@ fn doc_optional() {
         .build();
 
     p.cargo("doc")
-        .with_stderr_unordered(
-            "\
-[UPDATING] [..]
+        .with_stderr_data(
+            str![[r#"
+[UPDATING] `dummy-registry` index
+[LOCKING] 3 packages to latest compatible versions
 [DOWNLOADING] crates ...
-[DOWNLOADED] spin v1.0.0 [..]
-[DOWNLOADED] bar v1.0.0 [..]
+[DOWNLOADED] spin v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] bar v1.0.0 (registry `dummy-registry`)
 [DOCUMENTING] bar v1.0.0
 [CHECKING] bar v1.0.0
-[DOCUMENTING] foo v0.1.0 [..]
-[FINISHED] [..]
-",
+[DOCUMENTING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[GENERATED] [ROOT]/foo/target/doc/foo/index.html
+
+"#]]
+            .unordered(),
         )
         .run();
 }
@@ -2015,6 +2178,7 @@ fn minimal_download() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
 
                 [dependencies]
                 normal = "1.0"
@@ -2048,8 +2212,8 @@ fn minimal_download() {
         .build();
 
     let clear = || {
-        cargo_home().join("registry/cache").rm_rf();
-        cargo_home().join("registry/src").rm_rf();
+        paths::cargo_home().join("registry/cache").rm_rf();
+        paths::cargo_home().join("registry/src").rm_rf();
         p.build_dir().rm_rf();
     };
 
@@ -2057,21 +2221,24 @@ fn minimal_download() {
     // Should be the same as `-Zfeatures=all`
     p.cargo("check -Zfeatures=compare")
         .masquerade_as_nightly_cargo(&["features=compare"])
-        .with_stderr_unordered(
-            "\
-[UPDATING] [..]
+        .with_stderr_data(
+            str![[r#"
+[UPDATING] `dummy-registry` index
+[LOCKING] 14 packages to latest compatible versions
 [DOWNLOADING] crates ...
-[DOWNLOADED] normal_pm v1.0.0 [..]
-[DOWNLOADED] normal v1.0.0 [..]
-[DOWNLOADED] build_dep_pm v1.0.0 [..]
-[DOWNLOADED] build_dep v1.0.0 [..]
+[DOWNLOADED] normal_pm v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] normal v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] build_dep_pm v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] build_dep v1.0.0 (registry `dummy-registry`)
 [COMPILING] build_dep v1.0.0
 [COMPILING] build_dep_pm v1.0.0
 [CHECKING] normal_pm v1.0.0
 [CHECKING] normal v1.0.0
-[COMPILING] foo v0.1.0 [..]
-[FINISHED] [..]
-",
+[COMPILING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]]
+            .unordered(),
         )
         .run();
     clear();
@@ -2081,97 +2248,103 @@ fn minimal_download() {
 
     // all
     p.cargo("check")
-        .with_stderr_unordered(
-            "\
+        .with_stderr_data(
+            str![[r#"
 [DOWNLOADING] crates ...
-[DOWNLOADED] normal_pm v1.0.0 [..]
-[DOWNLOADED] normal v1.0.0 [..]
-[DOWNLOADED] build_dep_pm v1.0.0 [..]
-[DOWNLOADED] build_dep v1.0.0 [..]
-[COMPILING] build_dep v1.0.0
+[DOWNLOADED] normal_pm v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] normal v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] build_dep_pm v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] build_dep v1.0.0 (registry `dummy-registry`)
 [COMPILING] build_dep_pm v1.0.0
-[CHECKING] normal v1.0.0
+[COMPILING] build_dep v1.0.0
 [CHECKING] normal_pm v1.0.0
-[COMPILING] foo v0.1.0 [..]
-[FINISHED] [..]
-",
+[CHECKING] normal v1.0.0
+[COMPILING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]]
+            .unordered(),
         )
         .run();
     clear();
 
     // This disables decouple_dev_deps.
     p.cargo("test --no-run")
-        .with_stderr_unordered(
-            "\
+        .with_stderr_data(
+            str![[r#"
 [DOWNLOADING] crates ...
-[DOWNLOADED] normal_pm v1.0.0 [..]
-[DOWNLOADED] normal v1.0.0 [..]
-[DOWNLOADED] dev_dep_pm v1.0.0 [..]
-[DOWNLOADED] dev_dep v1.0.0 [..]
-[DOWNLOADED] build_dep_pm v1.0.0 [..]
-[DOWNLOADED] build_dep v1.0.0 [..]
-[COMPILING] build_dep v1.0.0
+[DOWNLOADED] normal_pm v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] normal v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] dev_dep_pm v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] dev_dep v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] build_dep_pm v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] build_dep v1.0.0 (registry `dummy-registry`)
 [COMPILING] build_dep_pm v1.0.0
+[COMPILING] build_dep v1.0.0
 [COMPILING] normal_pm v1.0.0
 [COMPILING] normal v1.0.0
-[COMPILING] dev_dep_pm v1.0.0
 [COMPILING] dev_dep v1.0.0
-[COMPILING] foo v0.1.0 [..]
-[FINISHED] [..]
-[EXECUTABLE] unittests src/lib.rs (target/debug/deps/foo-[..][EXE])
-",
+[COMPILING] dev_dep_pm v1.0.0
+[COMPILING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `test` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+[EXECUTABLE] unittests src/lib.rs (target/debug/deps/foo-[HASH][EXE])
+
+"#]]
+            .unordered(),
         )
         .run();
     clear();
 
     // This disables itarget, but leaves decouple_dev_deps enabled.
     p.cargo("tree -e normal --target=all")
-        .with_stderr_unordered(
-            "\
+        .with_stderr_data(
+            str![[r#"
 [DOWNLOADING] crates ...
-[DOWNLOADED] normal v1.0.0 [..]
-[DOWNLOADED] normal_pm v1.0.0 [..]
-[DOWNLOADED] build_dep v1.0.0 [..]
-[DOWNLOADED] build_dep_pm v1.0.0 [..]
-[DOWNLOADED] itarget_normal v1.0.0 [..]
-[DOWNLOADED] itarget_normal_pm v1.0.0 [..]
-[DOWNLOADED] itarget_build_dep v1.0.0 [..]
-[DOWNLOADED] itarget_build_dep_pm v1.0.0 [..]
-",
+[DOWNLOADED] normal_pm v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] normal v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] itarget_normal_pm v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] itarget_normal v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] itarget_build_dep_pm v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] itarget_build_dep v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] build_dep_pm v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] build_dep v1.0.0 (registry `dummy-registry`)
+
+"#]]
+            .unordered(),
         )
-        .with_stdout(
-            "\
+        .with_stdout_data(str![[r#"
 foo v0.1.0 ([ROOT]/foo)
 ├── itarget_normal v1.0.0
 ├── itarget_normal_pm v1.0.0
 ├── normal v1.0.0
 └── normal_pm v1.0.0
-",
-        )
+
+"#]])
         .run();
     clear();
 
     // This disables itarget and decouple_dev_deps.
     p.cargo("tree --target=all")
-        .with_stderr_unordered(
-            "\
+        .with_stderr_data(
+            str![[r#"
 [DOWNLOADING] crates ...
-[DOWNLOADED] normal_pm v1.0.0 [..]
-[DOWNLOADED] normal v1.0.0 [..]
-[DOWNLOADED] itarget_normal_pm v1.0.0 [..]
-[DOWNLOADED] itarget_normal v1.0.0 [..]
-[DOWNLOADED] itarget_dev_dep_pm v1.0.0 [..]
-[DOWNLOADED] itarget_dev_dep v1.0.0 [..]
-[DOWNLOADED] itarget_build_dep_pm v1.0.0 [..]
-[DOWNLOADED] itarget_build_dep v1.0.0 [..]
-[DOWNLOADED] dev_dep_pm v1.0.0 [..]
-[DOWNLOADED] dev_dep v1.0.0 [..]
-[DOWNLOADED] build_dep_pm v1.0.0 [..]
-[DOWNLOADED] build_dep v1.0.0 [..]
-",
+[DOWNLOADED] normal_pm v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] normal v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] itarget_normal_pm v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] itarget_normal v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] itarget_dev_dep_pm v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] itarget_dev_dep v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] itarget_build_dep_pm v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] itarget_build_dep v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] dev_dep_pm v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] dev_dep v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] build_dep_pm v1.0.0 (registry `dummy-registry`)
+[DOWNLOADED] build_dep v1.0.0 (registry `dummy-registry`)
+
+"#]]
+            .unordered(),
         )
-        .with_stdout(
-            "\
+        .with_stdout_data(str![[r#"
 foo v0.1.0 ([ROOT]/foo)
 ├── itarget_normal v1.0.0
 ├── itarget_normal_pm v1.0.0
@@ -2187,8 +2360,8 @@ foo v0.1.0 ([ROOT]/foo)
 ├── dev_dep_pm v1.0.0
 ├── itarget_dev_dep v1.0.0
 └── itarget_dev_dep_pm v1.0.0
-",
-        )
+
+"#]])
         .run();
     clear();
 }
@@ -2240,6 +2413,7 @@ fn pm_with_int_shared() {
                 [package]
                 name = "pm"
                 version = "0.1.0"
+                edition = "2015"
 
                 [lib]
                 proc-macro = true
@@ -2268,6 +2442,7 @@ fn pm_with_int_shared() {
                 [package]
                 name = "shared"
                 version = "0.1.0"
+                edition = "2015"
 
                 [features]
                 norm-feat = []
@@ -2293,32 +2468,37 @@ fn pm_with_int_shared() {
         .build();
 
     p.cargo("build --workspace --all-targets --all-features -v")
-        .with_stderr_unordered(
-            "\
-[COMPILING] shared [..]
-[RUNNING] `rustc --crate-name shared [..]--crate-type lib [..]
-[RUNNING] `rustc --crate-name shared [..]--crate-type lib [..]
-[RUNNING] `rustc --crate-name shared [..]--test[..]
-[COMPILING] pm [..]
-[RUNNING] `rustc --crate-name pm [..]--crate-type proc-macro[..]
-[RUNNING] `rustc --crate-name pm [..]--test[..]
-[COMPILING] foo [..]
-[RUNNING] `rustc --crate-name foo [..]--test[..]
-[RUNNING] `rustc --crate-name pm_test [..]--test[..]
-[RUNNING] `rustc --crate-name foo [..]--crate-type lib[..]
-[FINISHED] [..]
-",
+        .with_stderr_data(
+            str![[r#"
+[COMPILING] shared v0.1.0 ([ROOT]/foo/shared)
+[RUNNING] `rustc --crate-name shared [..]--crate-type lib [..]`
+[RUNNING] `rustc --crate-name shared [..]--crate-type lib [..]`
+[RUNNING] `rustc --crate-name shared [..]--test[..]`
+[COMPILING] pm v0.1.0 ([ROOT]/foo/pm)
+[RUNNING] `rustc --crate-name pm [..]--crate-type proc-macro[..]`
+[RUNNING] `rustc --crate-name pm [..]--test[..]`
+[COMPILING] foo v0.1.0 ([ROOT]/foo/foo)
+[RUNNING] `rustc --crate-name foo [..]--crate-type lib [..]`
+[RUNNING] `rustc --crate-name foo [..]--test[..]`
+[RUNNING] `rustc --crate-name pm_test [..]--test[..]`
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]]
+            .unordered(),
         )
         .run();
 
     // And again, should stay fresh.
     p.cargo("build --workspace --all-targets --all-features -v")
-        .with_stderr_unordered(
-            "\
-[FRESH] shared [..]
-[FRESH] pm [..]
-[FRESH] foo [..]
-[FINISHED] [..]",
+        .with_stderr_data(
+            str![[r#"
+[FRESH] pm v0.1.0 ([ROOT]/foo/pm)
+[FRESH] foo v0.1.0 ([ROOT]/foo/foo)
+[FRESH] shared v0.1.0 ([ROOT]/foo/shared)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]]
+            .unordered(),
         )
         .run();
 }
@@ -2336,6 +2516,7 @@ fn doc_proc_macro() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
                 resolver = "2"
 
                 [dependencies]
@@ -2349,6 +2530,7 @@ fn doc_proc_macro() {
                 [package]
                 name = "pm"
                 version = "0.1.0"
+                edition = "2015"
 
                 [lib]
                 proc-macro = true
@@ -2393,6 +2575,7 @@ fn edition_2021_default_2() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
 
                 [dependencies]
                 common = "1.0"
@@ -2405,13 +2588,12 @@ fn edition_2021_default_2() {
     // First without edition.
     p.cargo("tree -f")
         .arg("{p} feats:{f}")
-        .with_stdout(
-            "\
-foo v0.1.0 [..]
+        .with_stdout_data(str![[r#"
+foo v0.1.0 ([ROOT]/foo) feats:
 ├── bar v1.0.0 feats:
 └── common v1.0.0 feats:f1
-",
-        )
+
+"#]])
         .run();
 
     p.change_file(
@@ -2433,13 +2615,12 @@ foo v0.1.0 [..]
     // Importantly, this does not include `f1` on `common`.
     p.cargo("tree -f")
         .arg("{p} feats:{f}")
-        .with_stdout(
-            "\
-foo v0.1.0 [..]
+        .with_stdout_data(str![[r#"
+foo v0.1.0 ([ROOT]/foo) feats:
 ├── bar v1.0.0 feats:
 └── common v1.0.0 feats:
-",
-        )
+
+"#]])
         .run();
 }
 
@@ -2490,30 +2671,35 @@ fn all_features_merges_with_features() {
         .build();
 
     p.cargo("run --example ex --all-features --features dep/feat1")
-        .with_stderr(
-            "\
-[UPDATING] [..]
+        .with_stderr_data(str![[r#"
+[UPDATING] `dummy-registry` index
+[LOCKING] 1 package to latest compatible version
 [DOWNLOADING] crates ...
-[DOWNLOADED] [..]
+[DOWNLOADED] dep v0.1.0 (registry `dummy-registry`)
 [COMPILING] dep v0.1.0
-[COMPILING] foo v0.1.0 [..]
-[FINISHED] [..]
+[COMPILING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `target/debug/examples/ex[EXE]`
-",
-        )
-        .with_stdout("it works")
+
+"#]])
+        .with_stdout_data(str![[r#"
+it works
+
+"#]])
         .run();
 
     switch_to_resolver_2(&p);
 
     p.cargo("run --example ex --all-features --features dep/feat1")
-        .with_stderr(
-            "\
-[FINISHED] [..]
+        .with_stderr_data(str![[r#"
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
 [RUNNING] `target/debug/examples/ex[EXE]`
-",
-        )
-        .with_stdout("it works")
+
+"#]])
+        .with_stdout_data(str![[r#"
+it works
+
+"#]])
         .run();
 }
 
@@ -2576,14 +2762,57 @@ fn dep_with_optional_host_deps_activated() {
         .build();
 
     p.cargo("check")
-        .with_stderr(
-            "\
-[COMPILING] serde_build v0.1.0 ([CWD]/serde_build)
-[COMPILING] serde_derive v0.1.0 ([CWD]/serde_derive)
-[COMPILING] serde v0.1.0 ([CWD]/serde)
-[CHECKING] foo v0.1.0 ([CWD])
-[FINISHED] dev [..]
-",
+        .with_stderr_data(str![[r#"
+[LOCKING] 3 packages to latest compatible versions
+[COMPILING] serde_build v0.1.0 ([ROOT]/foo/serde_build)
+[COMPILING] serde_derive v0.1.0 ([ROOT]/foo/serde_derive)
+[COMPILING] serde v0.1.0 ([ROOT]/foo/serde)
+[CHECKING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn dont_unify_proc_macro_example_from_dependency() {
+    // See https://github.com/rust-lang/cargo/issues/13726
+    let p = project()
+        .file(
+            "Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                edition = "2021"
+
+                [dependencies]
+                pm_helper = { path = "pm_helper" }
+            "#,
         )
+        .file("src/lib.rs", "")
+        .file(
+            "pm_helper/Cargo.toml",
+            r#"
+                [package]
+                name = "pm_helper"
+
+                [[example]]
+                name = "pm"
+                proc-macro = true
+                crate-type = ["proc-macro"]
+            "#,
+        )
+        .file("pm_helper/src/lib.rs", "")
+        .file("pm_helper/examples/pm.rs", "")
+        .build();
+
+    p.cargo("check")
+        .with_stderr_data(str![[r#"
+[LOCKING] 1 package to latest compatible version
+[CHECKING] pm_helper v0.0.0 ([ROOT]/foo/pm_helper)
+[CHECKING] foo v0.0.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }

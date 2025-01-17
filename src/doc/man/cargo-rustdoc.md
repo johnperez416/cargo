@@ -24,6 +24,7 @@ See <https://doc.rust-lang.org/rustdoc/index.html> for documentation on rustdoc
 flags.
 
 {{> description-one-target }}
+
 To pass flags to all rustdoc processes spawned by Cargo, use the
 `RUSTDOCFLAGS` [environment variable](../reference/environment-variables.html)
 or the `build.rustdocflags` [config value](../reference/config.html).
@@ -66,8 +67,6 @@ if its name is the same as the lib target. Binaries are skipped if they have
 
 {{> options-profile }}
 
-{{> options-ignore-rust-version }}
-
 {{> options-timings }}
 
 {{/options}}
@@ -91,7 +90,11 @@ if its name is the same as the lib target. Binaries are skipped if they have
 {{#options}}
 {{> options-manifest-path }}
 
+{{> options-ignore-rust-version }}
+
 {{> options-locked }}
+
+{{> options-lockfile-path }}
 {{/options}}
 
 {{> section-options-common }}
@@ -101,6 +104,7 @@ if its name is the same as the lib target. Binaries are skipped if they have
 {{#options}}
 {{> options-jobs }}
 {{> options-keep-going }}
+{{> options-output-format }}
 {{/options}}
 
 {{> section-environment }}

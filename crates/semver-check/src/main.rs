@@ -13,6 +13,8 @@
 //! - `dont-deny`: By default tests have a `#![deny(warnings)]`. This option
 //!   avoids this attribute. Note that `#![allow(unused)]` is always added.
 
+#![allow(clippy::print_stderr)]
+
 use std::error::Error;
 use std::fs;
 use std::path::Path;
@@ -20,7 +22,7 @@ use std::process::{Command, Output};
 
 fn main() {
     if let Err(e) = doit() {
-        println!("error: {}", e);
+        eprintln!("error: {}", e);
         std::process::exit(1);
     }
 }
@@ -103,7 +105,7 @@ fn doit() -> Result<(), Box<dyn Error>> {
             result
         };
         let expect_success = parts[0][0].contains("MINOR");
-        println!("Running test from line {}", block_start);
+        eprintln!("Running test from line {}", block_start);
 
         let result = run_test(
             join(parts[1]),

@@ -1,3 +1,47 @@
+//! Interact with the [`TestRegistry`]
+//!
+//! # Example
+//!
+//! ```no_run
+//! use cargo_test_support::registry::Package;
+//! use cargo_test_support::project;
+//! use cargo_test_support::str;
+//!
+//! // Publish package "a" depending on "b".
+//! Package::new("a", "1.0.0")
+//!     .dep("b", "1.0.0")
+//!     .file("src/lib.rs", r#"
+//!         extern crate b;
+//!         pub fn f() -> i32 { b::f() * 2 }
+//!     "#)
+//!     .publish();
+//!
+//! // Publish package "b".
+//! Package::new("b", "1.0.0")
+//!     .file("src/lib.rs", r#"
+//!         pub fn f() -> i32 { 12 }
+//!     "#)
+//!     .publish();
+//!
+//! // Create a project that uses package "a".
+//! let p = project()
+//!     .file("Cargo.toml", r#"
+//!         [package]
+//!         name = "foo"
+//!         version = "0.0.1"
+//!
+//!         [dependencies]
+//!         a = "1.0"
+//!     "#)
+//!     .file("src/main.rs", r#"
+//!         extern crate a;
+//!         fn main() { println!("{}", a::f()); }
+//!     "#)
+//!     .build();
+//!
+//! p.cargo("run").with_stdout_data(str!["24"]).run();
+//! ```
+
 use crate::git::repo;
 use crate::paths;
 use crate::publish::{create_index_line, write_to_index};
@@ -20,39 +64,64 @@ use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
 use url::Url;
 
-/// Gets the path to the local index pretending to be crates.io. This is a Git repo
+/// Path to the local index for psuedo-crates.io.
+///
+/// This is a Git repo
 /// initialized with a `config.json` file pointing to `dl_path` for downloads
 /// and `api_path` for uploads.
+///
+/// ex: `$CARGO_TARGET_TMPDIR/cit/t0/registry`
 pub fn registry_path() -> PathBuf {
     generate_path("registry")
 }
-/// Gets the path for local web API uploads. Cargo will place the contents of a web API
+
+/// Path to the local web API uploads
+///
+/// Cargo will place the contents of a web API
 /// request here. For example, `api/v1/crates/new` is the result of publishing a crate.
+///
+/// ex: `$CARGO_TARGET_TMPDIR/cit/t0/api`
 pub fn api_path() -> PathBuf {
     generate_path("api")
 }
-/// Gets the path where crates can be downloaded using the web API endpoint. Crates
+
+/// Path to download `.crate` files using the web API endpoint.
+///
+/// Crates
 /// should be organized as `{name}/{version}/download` to match the web API
 /// endpoint. This is rarely used and must be manually set up.
-fn dl_path() -> PathBuf {
+///
+/// ex: `$CARGO_TARGET_TMPDIR/cit/t0/dl`
+pub fn dl_path() -> PathBuf {
     generate_path("dl")
 }
-/// Gets the alternative-registry version of `registry_path`.
-fn alt_registry_path() -> PathBuf {
+
+/// Path to the alternative-registry version of [`registry_path`]
+///
+/// ex: `$CARGO_TARGET_TMPDIR/cit/t0/alternative-registry`
+pub fn alt_registry_path() -> PathBuf {
     generate_path("alternative-registry")
 }
-/// Gets the alternative-registry version of `registry_url`.
+
+/// URL to the alternative-registry version of `registry_url`
 fn alt_registry_url() -> Url {
     generate_url("alternative-registry")
 }
-/// Gets the alternative-registry version of `dl_path`.
+
+/// Path to the alternative-registry version of [`dl_path`]
+///
+/// ex: `$CARGO_TARGET_TMPDIR/cit/t0/alternative-dl`
 pub fn alt_dl_path() -> PathBuf {
     generate_path("alternative-dl")
 }
-/// Gets the alternative-registry version of `api_path`.
+
+/// Path to the alternative-registry version of [`api_path`]
+///
+/// ex: `$CARGO_TARGET_TMPDIR/cit/t0/alternative-api`
 pub fn alt_api_path() -> PathBuf {
     generate_path("alternative-api")
 }
+
 fn generate_path(name: &str) -> PathBuf {
     paths::root().join(name)
 }
@@ -60,6 +129,7 @@ fn generate_url(name: &str) -> Url {
     Url::from_file_path(generate_path(name)).ok().unwrap()
 }
 
+/// Auth-token for publishing, see [`RegistryBuilder::token`]
 #[derive(Clone)]
 pub enum Token {
     Plaintext(String),
@@ -68,6 +138,7 @@ pub enum Token {
 
 impl Token {
     /// This is a valid PASETO secret key.
+    ///
     /// This one is already publicly available as part of the text of the RFC so is safe to use for tests.
     pub fn rfc_key() -> Token {
         Token::Keys(
@@ -80,7 +151,9 @@ impl Token {
 
 type RequestCallback = Box<dyn Send + Fn(&Request, &HttpServer) -> Response>;
 
-/// A builder for initializing registries.
+/// Prepare a local [`TestRegistry`] fixture
+///
+/// See also [`init`] and [`alt_init`]
 pub struct RegistryBuilder {
     /// If set, configures an alternate registry with the given name.
     alternative: Option<String>,
@@ -108,6 +181,9 @@ pub struct RegistryBuilder {
     credential_provider: Option<String>,
 }
 
+/// A local registry fixture
+///
+/// Most tests won't need to call this directly but instead interact with [`Package`]
 pub struct TestRegistry {
     server: Option<HttpServerHandle>,
     index_url: Url,
@@ -279,7 +355,7 @@ impl RegistryBuilder {
     /// Initializes the registry.
     #[must_use]
     pub fn build(self) -> TestRegistry {
-        let config_path = paths::home().join(".cargo/config");
+        let config_path = paths::cargo_home().join("config.toml");
         t!(fs::create_dir_all(config_path.parent().unwrap()));
         let prefix = if let Some(alternative) = &self.alternative {
             format!("{alternative}-")
@@ -391,7 +467,7 @@ impl RegistryBuilder {
         }
 
         if self.configure_token {
-            let credentials = paths::home().join(".cargo/credentials.toml");
+            let credentials = paths::cargo_home().join("credentials.toml");
             match &registry.token {
                 Token::Plaintext(token) => {
                     if let Some(alternative) = &self.alternative {
@@ -459,71 +535,31 @@ impl RegistryBuilder {
     }
 }
 
-/// A builder for creating a new package in a registry.
+/// Published package builder for [`TestRegistry`]
 ///
 /// This uses "source replacement" using an automatically generated
 /// `.cargo/config` file to ensure that dependencies will use these packages
 /// instead of contacting crates.io. See `source-replacement.md` for more
 /// details on how source replacement works.
 ///
-/// Call `publish` to finalize and create the package.
+/// Call [`Package::publish`] to finalize and create the package.
 ///
 /// If no files are specified, an empty `lib.rs` file is automatically created.
 ///
 /// The `Cargo.toml` file is automatically generated based on the methods
-/// called on `Package` (for example, calling `dep()` will add to the
+/// called on `Package` (for example, calling [`Package::dep()`] will add to the
 /// `[dependencies]` automatically). You may also specify a `Cargo.toml` file
 /// to override the generated one.
 ///
 /// This supports different registry types:
 /// - Regular source replacement that replaces `crates.io` (the default).
 /// - A "local registry" which is a subset for vendoring (see
-///   `Package::local`).
+///   [`Package::local`]).
 /// - An "alternative registry" which requires specifying the registry name
-///   (see `Package::alternative`).
+///   (see [`Package::alternative`]).
 ///
 /// This does not support "directory sources". See `directory.rs` for
 /// `VendorPackage` which implements directory sources.
-///
-/// # Example
-/// ```no_run
-/// use cargo_test_support::registry::Package;
-/// use cargo_test_support::project;
-///
-/// // Publish package "a" depending on "b".
-/// Package::new("a", "1.0.0")
-///     .dep("b", "1.0.0")
-///     .file("src/lib.rs", r#"
-///         extern crate b;
-///         pub fn f() -> i32 { b::f() * 2 }
-///     "#)
-///     .publish();
-///
-/// // Publish package "b".
-/// Package::new("b", "1.0.0")
-///     .file("src/lib.rs", r#"
-///         pub fn f() -> i32 { 12 }
-///     "#)
-///     .publish();
-///
-/// // Create a project that uses package "a".
-/// let p = project()
-///     .file("Cargo.toml", r#"
-///         [package]
-///         name = "foo"
-///         version = "0.0.1"
-///
-///         [dependencies]
-///         a = "1.0"
-///     "#)
-///     .file("src/main.rs", r#"
-///         extern crate a;
-///         fn main() { println!("{}", a::f()); }
-///     "#)
-///     .build();
-///
-/// p.cargo("run").with_stdout("24").run();
-/// ```
 #[must_use]
 pub struct Package {
     name: String,
@@ -534,7 +570,10 @@ pub struct Package {
     features: FeatureMap,
     local: bool,
     alternative: bool,
-    invalid_json: bool,
+    invalid_index_line: bool,
+    index_line: Option<String>,
+    edition: Option<String>,
+    resolver: Option<String>,
     proc_macro: bool,
     links: Option<String>,
     rust_version: Option<String>,
@@ -544,6 +583,7 @@ pub struct Package {
 
 pub(crate) type FeatureMap = BTreeMap<String, Vec<String>>;
 
+/// Published package dependency builder, see [`Package::add_dep`]
 #[derive(Clone)]
 pub struct Dependency {
     name: String,
@@ -557,6 +597,8 @@ pub struct Dependency {
     registry: Option<String>,
     package: Option<String>,
     optional: bool,
+    default_features: bool,
+    public: bool,
 }
 
 /// Entry with data that corresponds to [`tar::EntryType`].
@@ -580,14 +622,18 @@ struct PackageFile {
 
 const DEFAULT_MODE: u32 = 0o644;
 
-/// Initializes the on-disk registry and sets up the config so that crates.io
-/// is replaced with the one on disk.
+/// Setup a local psuedo-crates.io [`TestRegistry`]
+///
+/// This is implicitly called by [`Package::new`].
+///
+/// When calling `cargo publish`, see instead [`crate::publish`].
 pub fn init() -> TestRegistry {
     RegistryBuilder::new().build()
 }
 
-/// Variant of `init` that initializes the "alternative" registry and crates.io
-/// replacement.
+/// Setup a local "alternative" [`TestRegistry`]
+///
+/// When calling `cargo publish`, see instead [`crate::publish`].
 pub fn alt_init() -> TestRegistry {
     init();
     RegistryBuilder::new().alternative().build()
@@ -781,6 +827,7 @@ impl HttpServer {
             let buf = buf.get_mut();
             write!(buf, "HTTP/1.1 {}\r\n", response.code).unwrap();
             write!(buf, "Content-Length: {}\r\n", response.body.len()).unwrap();
+            write!(buf, "Connection: close\r\n").unwrap();
             for header in response.headers {
                 write!(buf, "{}\r\n", header).unwrap();
             }
@@ -790,7 +837,7 @@ impl HttpServer {
         }
     }
 
-    fn check_authorized(&self, req: &Request, mutation: Option<Mutation>) -> bool {
+    fn check_authorized(&self, req: &Request, mutation: Option<Mutation<'_>>) -> bool {
         let (private_key, private_key_subject) = if mutation.is_some() || self.auth_required {
             match &self.token {
                 Token::Plaintext(token) => return Some(token) == req.authorization.as_ref(),
@@ -832,7 +879,8 @@ impl HttpServer {
             url: &'a str,
             kip: &'a str,
         }
-        let footer: Footer = t!(serde_json::from_slice(untrusted_token.untrusted_footer()).ok());
+        let footer: Footer<'_> =
+            t!(serde_json::from_slice(untrusted_token.untrusted_footer()).ok());
         if footer.kip != paserk_pub_key_id {
             return false;
         }
@@ -846,7 +894,6 @@ impl HttpServer {
         if footer.url != "https://github.com/rust-lang/crates.io-index"
             && footer.url != &format!("sparse+http://{}/index/", self.addr.to_string())
         {
-            dbg!(footer.url);
             return false;
         }
 
@@ -862,20 +909,18 @@ impl HttpServer {
             _challenge: Option<&'a str>, // todo: PASETO with challenges
             v: Option<u8>,
         }
-        let message: Message = t!(serde_json::from_str(trusted_token.payload()).ok());
+        let message: Message<'_> = t!(serde_json::from_str(trusted_token.payload()).ok());
         let token_time = t!(OffsetDateTime::parse(message.iat, &Rfc3339).ok());
         let now = OffsetDateTime::now_utc();
         if (now - token_time) > Duration::MINUTE {
             return false;
         }
         if private_key_subject.as_deref() != message.sub {
-            dbg!(message.sub);
             return false;
         }
         // - If the claim v is set, that it has the value of 1.
         if let Some(v) = message.v {
             if v != 1 {
-                dbg!(message.v);
                 return false;
             }
         }
@@ -885,22 +930,18 @@ impl HttpServer {
         if let Some(mutation) = mutation {
             //  - That the operation matches the mutation field and is one of publish, yank, or unyank.
             if message.mutation != Some(mutation.mutation) {
-                dbg!(message.mutation);
                 return false;
             }
             //  - That the package, and version match the request.
             if message.name != mutation.name {
-                dbg!(message.name);
                 return false;
             }
             if message.vers != mutation.vers {
-                dbg!(message.vers);
                 return false;
             }
             //  - If the mutation is publish, that the version has not already been published, and that the hash matches the request.
             if mutation.mutation == "publish" {
                 if message.cksum != mutation.cksum {
-                    dbg!(message.cksum);
                     return false;
                 }
             }
@@ -1166,12 +1207,15 @@ fn save_new_crate(
                 "name": name,
                 "req": dep.version_req,
                 "features": dep.features,
-                "default_features": true,
+                "default_features": dep.default_features,
                 "target": dep.target,
                 "optional": dep.optional,
                 "kind": dep.kind,
                 "registry": dep.registry,
                 "package": package,
+                "artifact": dep.artifact,
+                "bindep_target": dep.bindep_target,
+                "lib": dep.lib,
             })
         })
         .collect::<Vec<_>>();
@@ -1184,7 +1228,7 @@ fn save_new_crate(
         new_crate.features,
         false,
         new_crate.links,
-        None,
+        new_crate.rust_version.as_deref(),
         None,
     );
 
@@ -1195,7 +1239,7 @@ impl Package {
     /// Creates a new package builder.
     /// Call `publish()` to finalize and build the package.
     pub fn new(name: &str, vers: &str) -> Package {
-        let config = paths::home().join(".cargo/config");
+        let config = paths::cargo_home().join("config.toml");
         if !config.exists() {
             init();
         }
@@ -1208,7 +1252,10 @@ impl Package {
             features: BTreeMap::new(),
             local: false,
             alternative: false,
-            invalid_json: false,
+            invalid_index_line: false,
+            index_line: None,
+            edition: None,
+            resolver: None,
             proc_macro: false,
             links: None,
             rust_version: None,
@@ -1234,6 +1281,8 @@ impl Package {
     /// See `src/doc/src/reference/registries.md` for more details on
     /// alternative registries. See `alt_registry.rs` for the tests that use
     /// this.
+    ///
+    /// **Requires:** [`alt_init`]
     pub fn alternative(&mut self, alternative: bool) -> &mut Package {
         self.alternative = alternative;
         self
@@ -1342,6 +1391,18 @@ impl Package {
         self
     }
 
+    /// Specifies `package.edition`
+    pub fn edition(&mut self, edition: &str) -> &mut Package {
+        self.edition = Some(edition.to_owned());
+        self
+    }
+
+    /// Specifies `package.resolver`
+    pub fn resolver(&mut self, resolver: &str) -> &mut Package {
+        self.resolver = Some(resolver.to_owned());
+        self
+    }
+
     /// Specifies whether or not this is a proc macro.
     pub fn proc_macro(&mut self, proc_macro: bool) -> &mut Package {
         self.proc_macro = proc_macro;
@@ -1363,8 +1424,16 @@ impl Package {
 
     /// Causes the JSON line emitted in the index to be invalid, presumably
     /// causing Cargo to skip over this version.
-    pub fn invalid_json(&mut self, invalid: bool) -> &mut Package {
-        self.invalid_json = invalid;
+    pub fn invalid_index_line(&mut self, invalid: bool) -> &mut Package {
+        self.invalid_index_line = invalid;
+        self
+    }
+
+    /// Override the auto-generated index line
+    ///
+    /// This can give more control over error cases than [`Package::invalid_index_line`]
+    pub fn index_line(&mut self, line: &str) -> &mut Package {
+        self.index_line = Some(line.to_owned());
         self
     }
 
@@ -1420,7 +1489,7 @@ impl Package {
                     "name": dep.name,
                     "req": dep.vers,
                     "features": dep.features,
-                    "default_features": true,
+                    "default_features": dep.default_features,
                     "target": dep.target,
                     "artifact": artifact,
                     "bindep_target": dep.bindep_target,
@@ -1429,6 +1498,7 @@ impl Package {
                     "kind": dep.kind,
                     "registry": registry_url,
                     "package": dep.package,
+                    "public": dep.public,
                 })
             })
             .collect::<Vec<_>>();
@@ -1436,22 +1506,26 @@ impl Package {
             let c = t!(fs::read(&self.archive_dst()));
             cksum(&c)
         };
-        let name = if self.invalid_json {
-            serde_json::json!(1)
+        let line = if let Some(line) = self.index_line.clone() {
+            line
         } else {
-            serde_json::json!(self.name)
+            let name = if self.invalid_index_line {
+                serde_json::json!(1)
+            } else {
+                serde_json::json!(self.name)
+            };
+            create_index_line(
+                name,
+                &self.vers,
+                deps,
+                &cksum,
+                self.features.clone(),
+                self.yanked,
+                self.links.clone(),
+                self.rust_version.as_deref(),
+                self.v,
+            )
         };
-        let line = create_index_line(
-            name,
-            &self.vers,
-            deps,
-            &cksum,
-            self.features.clone(),
-            self.yanked,
-            self.links.clone(),
-            self.rust_version.as_deref(),
-            self.v,
-        );
 
         let registry_path = if self.alternative {
             alt_registry_path()
@@ -1468,7 +1542,8 @@ impl Package {
         let dst = self.archive_dst();
         t!(fs::create_dir_all(dst.parent().unwrap()));
         let f = t!(File::create(&dst));
-        let mut a = Builder::new(GzEncoder::new(f, Compression::default()));
+        let mut a = Builder::new(GzEncoder::new(f, Compression::none()));
+        a.sparse(false);
 
         if !self
             .files
@@ -1525,7 +1600,39 @@ impl Package {
         ));
 
         if let Some(version) = &self.rust_version {
-            manifest.push_str(&format!("rust-version = \"{}\"", version));
+            manifest.push_str(&format!("rust-version = \"{}\"\n", version));
+        }
+
+        if let Some(edition) = &self.edition {
+            manifest.push_str(&format!("edition = \"{}\"\n", edition));
+        }
+
+        if let Some(resolver) = &self.resolver {
+            manifest.push_str(&format!("resolver = \"{}\"\n", resolver));
+        }
+
+        if !self.features.is_empty() {
+            let features: Vec<String> = self
+                .features
+                .iter()
+                .map(|(feature, features)| {
+                    if features.is_empty() {
+                        format!("{} = []", feature)
+                    } else {
+                        format!(
+                            "{} = [{}]",
+                            feature,
+                            features
+                                .iter()
+                                .map(|s| format!("\"{}\"", s))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )
+                    }
+                })
+                .collect();
+
+            manifest.push_str(&format!("\n[features]\n{}", features.join("\n")));
         }
 
         for dep in self.deps.iter() {
@@ -1545,6 +1652,9 @@ impl Package {
             "#,
                 target, kind, dep.name, dep.vers
             ));
+            if dep.optional {
+                manifest.push_str("optional = true\n");
+            }
             if let Some(artifact) = &dep.artifact {
                 manifest.push_str(&format!("artifact = \"{}\"\n", artifact));
             }
@@ -1557,6 +1667,21 @@ impl Package {
             if let Some(registry) = &dep.registry {
                 assert_eq!(registry, "alternative");
                 manifest.push_str(&format!("registry-index = \"{}\"", alt_registry_url()));
+            }
+            if !dep.default_features {
+                manifest.push_str("default-features = false\n");
+            }
+            if !dep.features.is_empty() {
+                let mut features = String::new();
+                serde::Serialize::serialize(
+                    &dep.features,
+                    toml::ser::ValueSerializer::new(&mut features),
+                )
+                .unwrap();
+                manifest.push_str(&format!("features = {}\n", features));
+            }
+            if let Some(package) = &dep.package {
+                manifest.push_str(&format!("package = \"{}\"\n", package));
             }
         }
         if self.proc_macro {
@@ -1606,7 +1731,12 @@ impl Package {
     /// Returns the path to the compressed package file.
     pub fn archive_dst(&self) -> PathBuf {
         if self.local {
-            registry_path().join(format!("{}-{}.crate", self.name, self.vers))
+            let path = if self.alternative {
+                alt_registry_path()
+            } else {
+                registry_path()
+            };
+            path.join(format!("{}-{}.crate", self.name, self.vers))
         } else if self.alternative {
             alt_dl_path()
                 .join(&self.name)
@@ -1618,6 +1748,7 @@ impl Package {
     }
 }
 
+/// Generate a checksum
 pub fn cksum(s: &[u8]) -> String {
     Sha256::new().update(s).finish_hex()
 }
@@ -1636,6 +1767,8 @@ impl Dependency {
             package: None,
             optional: false,
             registry: None,
+            default_features: true,
+            public: false,
         }
     }
 
@@ -1686,6 +1819,18 @@ impl Dependency {
     /// Changes this to an optional dependency.
     pub fn optional(&mut self, optional: bool) -> &mut Self {
         self.optional = optional;
+        self
+    }
+
+    /// Changes this to an public dependency.
+    pub fn public(&mut self, public: bool) -> &mut Self {
+        self.public = public;
+        self
+    }
+
+    /// Adds `default-features = false` if the argument is `false`.
+    pub fn default_features(&mut self, default_features: bool) -> &mut Self {
+        self.default_features = default_features;
         self
     }
 }

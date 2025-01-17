@@ -8,9 +8,11 @@ use anyhow::Context as _;
 
 use super::dependency::Dependency;
 use crate::core::dependency::DepKind;
-use crate::core::FeatureValue;
+use crate::core::{FeatureValue, Features, Workspace};
+use crate::util::closest;
 use crate::util::interning::InternedString;
-use crate::CargoResult;
+use crate::util::toml::{is_embedded, ScriptSource};
+use crate::{CargoResult, GlobalContext};
 
 /// Dependency table to add deps to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,7 +84,7 @@ impl From<DepKind> for DepTable {
 #[derive(Debug, Clone)]
 pub struct Manifest {
     /// Manifest contents as TOML data.
-    pub data: toml_edit::Document,
+    pub data: toml_edit::DocumentMut,
 }
 
 impl Manifest {
@@ -225,7 +227,7 @@ impl str::FromStr for Manifest {
 
     /// Read manifest data from string
     fn from_str(input: &str) -> ::std::result::Result<Self, Self::Err> {
-        let d: toml_edit::Document = input.parse().context("Manifest not valid TOML")?;
+        let d: toml_edit::DocumentMut = input.parse().context("Manifest not valid TOML")?;
 
         Ok(Manifest { data: d })
     }
@@ -244,6 +246,10 @@ pub struct LocalManifest {
     pub path: PathBuf,
     /// Manifest contents.
     pub manifest: Manifest,
+    /// The raw, unparsed package file
+    pub raw: String,
+    /// Edit location for an embedded manifest, if relevant
+    pub embedded: Option<Embedded>,
 }
 
 impl Deref for LocalManifest {
@@ -266,43 +272,66 @@ impl LocalManifest {
         if !path.is_absolute() {
             anyhow::bail!("can only edit absolute paths, got {}", path.display());
         }
-        let data = cargo_util::paths::read(&path)?;
+        let raw = cargo_util::paths::read(&path)?;
+        let mut data = raw.clone();
+        let mut embedded = None;
+        if is_embedded(path) {
+            let source = ScriptSource::parse(&data)?;
+            if let Some(frontmatter) = source.frontmatter() {
+                embedded = Some(Embedded::exists(&data, frontmatter));
+                data = frontmatter.to_owned();
+            } else if let Some(shebang) = source.shebang() {
+                embedded = Some(Embedded::after(&data, shebang));
+                data = String::new();
+            } else {
+                embedded = Some(Embedded::start());
+                data = String::new();
+            }
+        }
         let manifest = data.parse().context("Unable to parse Cargo.toml")?;
         Ok(LocalManifest {
             manifest,
             path: path.to_owned(),
+            raw,
+            embedded,
         })
     }
 
     /// Write changes back to the file.
     pub fn write(&self) -> CargoResult<()> {
-        if !self.manifest.data.contains_key("package")
-            && !self.manifest.data.contains_key("project")
-        {
-            if self.manifest.data.contains_key("workspace") {
-                anyhow::bail!(
-                    "found virtual manifest at {}, but this command requires running against an \
-                         actual package in this workspace.",
-                    self.path.display()
-                );
-            } else {
-                anyhow::bail!(
-                    "missing expected `package` or `project` fields in {}",
-                    self.path.display()
-                );
+        let mut manifest = self.manifest.data.to_string();
+        let raw = match self.embedded.as_ref() {
+            Some(Embedded::Implicit(start)) => {
+                if !manifest.ends_with("\n") {
+                    manifest.push_str("\n");
+                }
+                let fence = "---\n";
+                let prefix = &self.raw[0..*start];
+                let suffix = &self.raw[*start..];
+                let empty_line = if prefix.is_empty() { "\n" } else { "" };
+                format!("{prefix}{fence}{manifest}{fence}{empty_line}{suffix}")
             }
-        }
+            Some(Embedded::Explicit(span)) => {
+                if !manifest.ends_with("\n") {
+                    manifest.push_str("\n");
+                }
+                let prefix = &self.raw[0..span.start];
+                let suffix = &self.raw[span.end..];
+                format!("{prefix}{manifest}{suffix}")
+            }
+            None => manifest,
+        };
+        let new_contents_bytes = raw.as_bytes();
 
-        let s = self.manifest.data.to_string();
-        let new_contents_bytes = s.as_bytes();
-
-        cargo_util::paths::write(&self.path, new_contents_bytes)
+        cargo_util::paths::write_atomic(&self.path, new_contents_bytes)
     }
 
     /// Lookup a dependency.
     pub fn get_dependency_versions<'s>(
         &'s self,
         dep_key: &'s str,
+        ws: &'s Workspace<'_>,
+        unstable_features: &'s Features,
     ) -> impl Iterator<Item = (DepTable, CargoResult<Dependency>)> + 's {
         let crate_root = self.path.parent().expect("manifest path is absolute");
         self.get_sections()
@@ -324,7 +353,14 @@ impl LocalManifest {
             })
             .flatten()
             .map(move |(table_path, dep_key, dep_item)| {
-                let dep = Dependency::from_toml(crate_root, &dep_key, &dep_item);
+                let dep = Dependency::from_toml(
+                    ws.gctx(),
+                    ws.root(),
+                    crate_root,
+                    unstable_features,
+                    &dep_key,
+                    &dep_item,
+                );
                 (table_path, dep)
             })
     }
@@ -334,6 +370,9 @@ impl LocalManifest {
         &mut self,
         table_path: &[String],
         dep: &Dependency,
+        gctx: &GlobalContext,
+        workspace_root: &Path,
+        unstable_features: &Features,
     ) -> CargoResult<()> {
         let crate_root = self
             .path
@@ -348,13 +387,24 @@ impl LocalManifest {
             .unwrap()
             .get_key_value_mut(dep_key)
         {
-            dep.update_toml(&crate_root, &mut dep_key, dep_item);
+            dep.update_toml(
+                gctx,
+                workspace_root,
+                &crate_root,
+                unstable_features,
+                &mut dep_key,
+                dep_item,
+            )?;
+            if let Some(table) = dep_item.as_inline_table_mut() {
+                // So long as we don't have `Cargo.toml` auto-formatting and inline-tables can only
+                // be on one line, there isn't really much in the way of interesting formatting to
+                // include (no comments), so let's just wipe it clean
+                table.fmt();
+            }
         } else {
-            let new_dependency = dep.to_toml(&crate_root);
+            let new_dependency =
+                dep.to_toml(gctx, workspace_root, &crate_root, unstable_features)?;
             table[dep_key] = new_dependency;
-        }
-        if let Some(t) = table.as_inline_table_mut() {
-            t.fmt()
         }
 
         Ok(())
@@ -364,20 +414,91 @@ impl LocalManifest {
     pub fn remove_from_table(&mut self, table_path: &[String], name: &str) -> CargoResult<()> {
         let parent_table = self.get_table_mut(table_path)?;
 
-        let dep = parent_table
-            .get_mut(name)
-            .filter(|t| !t.is_none())
-            .ok_or_else(|| non_existent_dependency_err(name, table_path.join(".")))?;
+        match parent_table.get_mut(name).filter(|t| !t.is_none()) {
+            Some(dep) => {
+                // remove the dependency
+                *dep = toml_edit::Item::None;
 
-        // remove the dependency
-        *dep = toml_edit::Item::None;
+                // remove table if empty
+                if parent_table.as_table_like().unwrap().is_empty() {
+                    *parent_table = toml_edit::Item::None;
+                }
+            }
+            None => {
+                let names = parent_table
+                    .as_table_like()
+                    .map(|t| t.iter())
+                    .into_iter()
+                    .flatten();
+                let alt_name = closest(name, names.map(|(k, _)| k), |k| k).map(|n| n.to_owned());
 
-        // remove table if empty
-        if parent_table.as_table_like().unwrap().is_empty() {
-            *parent_table = toml_edit::Item::None;
+                // Search in other tables.
+                let sections = self.get_sections();
+                let found_table_path = sections.iter().find_map(|(t, i)| {
+                    let table_path: Vec<String> =
+                        t.to_table().iter().map(|s| s.to_string()).collect();
+                    i.get(name).is_some().then(|| table_path.join("."))
+                });
+
+                return Err(non_existent_dependency_err(
+                    name,
+                    table_path.join("."),
+                    found_table_path,
+                    alt_name.as_deref(),
+                ));
+            }
         }
 
         Ok(())
+    }
+
+    /// Allow mutating depedencies, wherever they live.
+    /// Copied from cargo-edit.
+    pub fn get_dependency_tables_mut(
+        &mut self,
+    ) -> impl Iterator<Item = &mut dyn toml_edit::TableLike> + '_ {
+        let root = self.data.as_table_mut();
+        root.iter_mut().flat_map(|(k, v)| {
+            if DepTable::KINDS
+                .iter()
+                .any(|dt| dt.kind.kind_table() == k.get())
+            {
+                v.as_table_like_mut().into_iter().collect::<Vec<_>>()
+            } else if k == "workspace" {
+                v.as_table_like_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .filter_map(|(k, v)| {
+                        if k.get() == "dependencies" {
+                            v.as_table_like_mut()
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            } else if k == "target" {
+                v.as_table_like_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .flat_map(|(_, v)| {
+                        v.as_table_like_mut().into_iter().flat_map(|v| {
+                            v.iter_mut().filter_map(|(k, v)| {
+                                if DepTable::KINDS
+                                    .iter()
+                                    .any(|dt| dt.kind.kind_table() == k.get())
+                                {
+                                    v.as_table_like_mut()
+                                } else {
+                                    None
+                                }
+                            })
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            }
+        })
     }
 
     /// Remove references to `dep_key` if its no longer present.
@@ -403,7 +524,7 @@ impl LocalManifest {
         }
     }
 
-    fn is_explicit_dep_activation(&self, dep_key: &str) -> bool {
+    pub fn is_explicit_dep_activation(&self, dep_key: &str) -> bool {
         if let Some(toml_edit::Item::Table(feature_table)) = self.data.as_table().get("features") {
             for values in feature_table
                 .iter()
@@ -453,6 +574,51 @@ impl std::fmt::Display for LocalManifest {
     }
 }
 
+/// Edit location for an embedded manifest
+#[derive(Clone, Debug)]
+pub enum Embedded {
+    /// Manifest is implicit
+    ///
+    /// This is the insert location for a frontmatter
+    Implicit(usize),
+    /// Manifest is explicit in a frontmatter
+    ///
+    /// This is the span of the frontmatter body
+    Explicit(std::ops::Range<usize>),
+}
+
+impl Embedded {
+    fn start() -> Self {
+        Self::Implicit(0)
+    }
+
+    fn after(input: &str, after: &str) -> Self {
+        let span = substr_span(input, after);
+        let end = span.end;
+        Self::Implicit(end)
+    }
+
+    fn exists(input: &str, exists: &str) -> Self {
+        let span = substr_span(input, exists);
+        Self::Explicit(span)
+    }
+}
+
+fn substr_span(haystack: &str, needle: &str) -> std::ops::Range<usize> {
+    let haystack_start_ptr = haystack.as_ptr();
+    let haystack_end_ptr = haystack[haystack.len()..haystack.len()].as_ptr();
+
+    let needle_start_ptr = needle.as_ptr();
+    let needle_end_ptr = needle[needle.len()..needle.len()].as_ptr();
+
+    assert!(needle_end_ptr < haystack_end_ptr);
+    assert!(haystack_start_ptr <= needle_start_ptr);
+    let start = needle_start_ptr as usize - haystack_start_ptr as usize;
+    let end = start + needle.len();
+
+    start..end
+}
+
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 enum DependencyStatus {
     None,
@@ -494,12 +660,7 @@ fn fix_feature_activations(
 
     // Remove found idx in revers order so we don't invalidate the idx.
     for idx in remove_list.iter().rev() {
-        feature_values.remove(*idx);
-    }
-    if !remove_list.is_empty() {
-        // HACK: Instead of cleaning up the users formatting from having removed a feature, we just
-        // re-format the whole feature list
-        feature_values.fmt();
+        remove_array_index(feature_values, *idx);
     }
 
     if status == DependencyStatus::Required {
@@ -539,7 +700,56 @@ fn non_existent_table_err(table: impl std::fmt::Display) -> anyhow::Error {
 
 fn non_existent_dependency_err(
     name: impl std::fmt::Display,
-    table: impl std::fmt::Display,
+    search_table: impl std::fmt::Display,
+    found_table: Option<impl std::fmt::Display>,
+    alt_name: Option<&str>,
 ) -> anyhow::Error {
-    anyhow::format_err!("the dependency `{name}` could not be found in `{table}`.")
+    let mut msg = format!("the dependency `{name}` could not be found in `{search_table}`");
+    if let Some(found_table) = found_table {
+        msg.push_str(&format!("; it is present in `{found_table}`",));
+    } else if let Some(alt_name) = alt_name {
+        msg.push_str(&format!("; dependency `{alt_name}` exists",));
+    }
+    anyhow::format_err!(msg)
+}
+
+fn remove_array_index(array: &mut toml_edit::Array, index: usize) {
+    let value = array.remove(index);
+
+    // Captures all lines before leading whitespace
+    let prefix_lines = value
+        .decor()
+        .prefix()
+        .and_then(|p| p.as_str().expect("spans removed").rsplit_once('\n'))
+        .map(|(lines, _current)| lines);
+    // Captures all lines after trailing whitespace, before the next comma
+    let suffix_lines = value
+        .decor()
+        .suffix()
+        .and_then(|p| p.as_str().expect("spans removed").split_once('\n'))
+        .map(|(_current, lines)| lines);
+    let mut merged_lines = String::new();
+    if let Some(prefix_lines) = prefix_lines {
+        merged_lines.push_str(prefix_lines);
+        merged_lines.push('\n');
+    }
+    if let Some(suffix_lines) = suffix_lines {
+        merged_lines.push_str(suffix_lines);
+        merged_lines.push('\n');
+    }
+
+    let next_index = index; // Since `index` was removed, that effectively auto-advances us
+    if let Some(next) = array.get_mut(next_index) {
+        let next_decor = next.decor_mut();
+        let next_prefix = next_decor
+            .prefix()
+            .map(|s| s.as_str().expect("spans removed"))
+            .unwrap_or_default();
+        merged_lines.push_str(next_prefix);
+        next_decor.set_prefix(merged_lines);
+    } else {
+        let trailing = array.trailing().as_str().expect("spans removed");
+        merged_lines.push_str(trailing);
+        array.set_trailing(merged_lines);
+    }
 }

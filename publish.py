@@ -11,25 +11,40 @@
 import os
 import re
 import subprocess
-import time
 import urllib.request
 from urllib.error import HTTPError
 
 
+# Whenever you add a new crate to this list that does NOT start with "cargo-"
+# you must reach out to the infra team to add the crate to the list of crates
+# allowed to be published from the "cargo CI" crates.io token.
 TO_PUBLISH = [
+    'credential/cargo-credential',
+    'credential/cargo-credential-libsecret',
+    'credential/cargo-credential-wincred',
+    'credential/cargo-credential-1password',
+    'credential/cargo-credential-macos-keychain',
+    'crates/rustfix',
     'crates/cargo-platform',
     'crates/cargo-util',
     'crates/crates-io',
+    'crates/cargo-util-schemas',
+    'crates/cargo-test-macro',
+    'crates/cargo-test-support',
     '.',
 ]
 
 
 def already_published(name, version):
+    url = f'https://static.crates.io/crates/{name}/{version}/download'
     try:
-        urllib.request.urlopen('https://crates.io/api/v1/crates/%s/%s/download' % (name, version))
+        urllib.request.urlopen(url)
     except HTTPError as e:
-        if e.code == 404:
+        # 403 and 404 are common responses to assume it is not published
+        if 400 <= e.code < 500:
             return False
+        print(f'error: failed to check if {name} {version} is already published')
+        print(f'    HTTP response error code {e.code} checking {url}')
         raise
     return True
 
@@ -47,13 +62,9 @@ def maybe_publish(path):
 
 def main():
     print('Starting publish...')
-    for i, path in enumerate(TO_PUBLISH):
-        if maybe_publish(path):
-            if i < len(TO_PUBLISH)-1:
-                # Sleep to allow the index to update. This should probably
-                # check that the index is updated, or use a retry loop
-                # instead.
-                time.sleep(5)
+    for path in TO_PUBLISH:
+        maybe_publish(path)
+
     print('Publish complete!')
 
 

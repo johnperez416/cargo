@@ -1,46 +1,86 @@
 use anyhow::Context as _;
 
+use cargo_util_schemas::manifest::PackageName;
+
 use crate::util::restricted_names;
 use crate::CargoResult;
-use crate::Config;
+use crate::GlobalContext;
 
 const DEFAULT_EDITION: crate::core::features::Edition =
     crate::core::features::Edition::LATEST_STABLE;
-const DEFAULT_VERSION: &str = "0.0.0";
-const DEFAULT_PUBLISH: bool = false;
-const AUTO_FIELDS: &[&str] = &["autobins", "autoexamples", "autotests", "autobenches"];
+const AUTO_FIELDS: &[&str] = &[
+    "autolib",
+    "autobins",
+    "autoexamples",
+    "autotests",
+    "autobenches",
+];
 
-pub fn expand_manifest(
+pub(super) fn expand_manifest(
     content: &str,
     path: &std::path::Path,
-    config: &Config,
+    gctx: &GlobalContext,
 ) -> CargoResult<String> {
-    let comment = match extract_comment(content) {
-        Ok(comment) => Some(comment),
-        Err(err) => {
-            tracing::trace!("failed to extract doc comment: {err}");
-            None
+    let source = ScriptSource::parse(content)?;
+    if let Some(frontmatter) = source.frontmatter() {
+        match source.info() {
+            Some("cargo") | None => {}
+            Some(other) => {
+                if let Some(remainder) = other.strip_prefix("cargo,") {
+                    anyhow::bail!("cargo does not support frontmatter infostring attributes like `{remainder}` at this time")
+                } else {
+                    anyhow::bail!("frontmatter infostring `{other}` is unsupported by cargo; specify `cargo` for embedding a manifest")
+                }
+            }
         }
-    }
-    .unwrap_or_default();
-    let manifest = match extract_manifest(&comment)? {
-        Some(manifest) => Some(manifest),
-        None => {
-            tracing::trace!("failed to extract manifest");
-            None
+
+        // HACK: until rustc has native support for this syntax, we have to remove it from the
+        // source file
+        use std::fmt::Write as _;
+        let hash = crate::util::hex::short_hash(&path.to_string_lossy());
+        let mut rel_path = std::path::PathBuf::new();
+        rel_path.push("target");
+        rel_path.push(&hash[0..2]);
+        rel_path.push(&hash[2..]);
+        let target_dir = gctx.home().join(rel_path);
+        let hacked_path = target_dir
+            .join(
+                path.file_name()
+                    .expect("always a name for embedded manifests"),
+            )
+            .into_path_unlocked();
+        let mut hacked_source = String::new();
+        if let Some(shebang) = source.shebang() {
+            writeln!(hacked_source, "{shebang}")?;
         }
+        writeln!(hacked_source)?; // open
+        for _ in 0..frontmatter.lines().count() {
+            writeln!(hacked_source)?;
+        }
+        writeln!(hacked_source)?; // close
+        writeln!(hacked_source, "{}", source.content())?;
+        if let Some(parent) = hacked_path.parent() {
+            cargo_util::paths::create_dir_all(parent)?;
+        }
+        cargo_util::paths::write_if_changed(&hacked_path, hacked_source)?;
+
+        let manifest = expand_manifest_(&frontmatter, &hacked_path, gctx)
+            .with_context(|| format!("failed to parse manifest at {}", path.display()))?;
+        let manifest = toml::to_string_pretty(&manifest)?;
+        Ok(manifest)
+    } else {
+        let frontmatter = "";
+        let manifest = expand_manifest_(frontmatter, path, gctx)
+            .with_context(|| format!("failed to parse manifest at {}", path.display()))?;
+        let manifest = toml::to_string_pretty(&manifest)?;
+        Ok(manifest)
     }
-    .unwrap_or_default();
-    let manifest = expand_manifest_(&manifest, path, config)
-        .with_context(|| format!("failed to parse manifest at {}", path.display()))?;
-    let manifest = toml::to_string_pretty(&manifest)?;
-    Ok(manifest)
 }
 
 fn expand_manifest_(
     manifest: &str,
     path: &std::path::Path,
-    config: &Config,
+    gctx: &GlobalContext,
 ) -> CargoResult<toml::Table> {
     let mut manifest: toml::Table = toml::from_str(&manifest)?;
 
@@ -66,10 +106,8 @@ fn expand_manifest_(
             anyhow::bail!("`package.{key}` is not allowed in embedded manifests")
         }
     }
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| anyhow::format_err!("no file name"))?
-        .to_string_lossy();
+    // HACK: Using an absolute path while `hacked_path` is in use
+    let bin_path = path.to_string_lossy().into_owned();
     let file_stem = path
         .file_stem()
         .ok_or_else(|| anyhow::format_err!("no file name"))?
@@ -79,11 +117,8 @@ fn expand_manifest_(
     package
         .entry("name".to_owned())
         .or_insert(toml::Value::String(name));
-    package
-        .entry("version".to_owned())
-        .or_insert_with(|| toml::Value::String(DEFAULT_VERSION.to_owned()));
     package.entry("edition".to_owned()).or_insert_with(|| {
-        let _ = config.shell().warn(format_args!(
+        let _ = gctx.shell().warn(format_args!(
             "`package.edition` is unspecified, defaulting to `{}`",
             DEFAULT_EDITION
         ));
@@ -92,9 +127,6 @@ fn expand_manifest_(
     package
         .entry("build".to_owned())
         .or_insert_with(|| toml::Value::Boolean(false));
-    package
-        .entry("publish".to_owned())
-        .or_insert_with(|| toml::Value::Boolean(DEFAULT_PUBLISH));
     for field in AUTO_FIELDS {
         package
             .entry(field.to_owned())
@@ -103,27 +135,11 @@ fn expand_manifest_(
 
     let mut bin = toml::Table::new();
     bin.insert("name".to_owned(), toml::Value::String(bin_name));
-    bin.insert(
-        "path".to_owned(),
-        toml::Value::String(file_name.into_owned()),
-    );
+    bin.insert("path".to_owned(), toml::Value::String(bin_path));
     manifest.insert(
         "bin".to_owned(),
         toml::Value::Array(vec![toml::Value::Table(bin)]),
     );
-
-    let release = manifest
-        .entry("profile".to_owned())
-        .or_insert_with(|| toml::Value::Table(Default::default()))
-        .as_table_mut()
-        .ok_or_else(|| anyhow::format_err!("`profile` must be a table"))?
-        .entry("release".to_owned())
-        .or_insert_with(|| toml::Value::Table(Default::default()))
-        .as_table_mut()
-        .ok_or_else(|| anyhow::format_err!("`profile.release` must be a table"))?;
-    release
-        .entry("strip".to_owned())
-        .or_insert_with(|| toml::Value::Boolean(true));
 
     Ok(manifest)
 }
@@ -138,7 +154,7 @@ fn sanitize_name(name: &str) -> String {
         '-'
     };
 
-    let mut name = restricted_names::sanitize_package_name(name, placeholder);
+    let mut name = PackageName::sanitize(name, placeholder).into_inner();
 
     loop {
         if restricted_names::is_keyword(&name) {
@@ -159,371 +175,427 @@ fn sanitize_name(name: &str) -> String {
     name
 }
 
-/// Locates a "code block manifest" in Rust source.
-fn extract_comment(input: &str) -> CargoResult<String> {
-    let mut doc_fragments = Vec::new();
-    let file = syn::parse_file(input)?;
-    // HACK: `syn` doesn't tell us what kind of comment was used, so infer it from how many
-    // attributes were used
-    let kind = if 1 < file
-        .attrs
-        .iter()
-        .filter(|attr| attr.meta.path().is_ident("doc"))
-        .count()
-    {
-        CommentKind::Line
-    } else {
-        CommentKind::Block
-    };
-    for attr in &file.attrs {
-        if attr.meta.path().is_ident("doc") {
-            doc_fragments.push(DocFragment::new(attr, kind)?);
-        }
-    }
-    if doc_fragments.is_empty() {
-        anyhow::bail!("no doc-comment found");
-    }
-    unindent_doc_fragments(&mut doc_fragments);
-
-    let mut doc_comment = String::new();
-    for frag in &doc_fragments {
-        add_doc_fragment(&mut doc_comment, frag);
-    }
-
-    Ok(doc_comment)
+#[derive(Debug)]
+pub struct ScriptSource<'s> {
+    shebang: Option<&'s str>,
+    info: Option<&'s str>,
+    frontmatter: Option<&'s str>,
+    content: &'s str,
 }
 
-/// A `#[doc]`
-#[derive(Clone, Debug)]
-struct DocFragment {
-    /// The attribute value
-    doc: String,
-    /// Indentation used within `doc
-    indent: usize,
-}
-
-impl DocFragment {
-    fn new(attr: &syn::Attribute, kind: CommentKind) -> CargoResult<Self> {
-        let syn::Meta::NameValue(nv) = &attr.meta else {
-            anyhow::bail!("unsupported attr meta for {:?}", attr.meta.path())
-        };
-        let syn::Expr::Lit(syn::ExprLit {
-            lit: syn::Lit::Str(lit),
-            ..
-        }) = &nv.value
-        else {
-            anyhow::bail!("only string literals are supported")
-        };
-        Ok(Self {
-            doc: beautify_doc_string(lit.value(), kind),
-            indent: 0,
-        })
-    }
-}
-
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub enum CommentKind {
-    Line,
-    Block,
-}
-
-/// Makes a doc string more presentable to users.
-/// Used by rustdoc and perhaps other tools, but not by rustc.
-///
-/// See `rustc_ast/util/comments.rs`
-fn beautify_doc_string(data: String, kind: CommentKind) -> String {
-    fn get_vertical_trim(lines: &[&str]) -> Option<(usize, usize)> {
-        let mut i = 0;
-        let mut j = lines.len();
-        // first line of all-stars should be omitted
-        if !lines.is_empty() && lines[0].chars().all(|c| c == '*') {
-            i += 1;
-        }
-
-        // like the first, a last line of all stars should be omitted
-        if j > i && !lines[j - 1].is_empty() && lines[j - 1].chars().all(|c| c == '*') {
-            j -= 1;
-        }
-
-        if i != 0 || j != lines.len() {
-            Some((i, j))
-        } else {
-            None
-        }
-    }
-
-    fn get_horizontal_trim(lines: &[&str], kind: CommentKind) -> Option<String> {
-        let mut i = usize::MAX;
-        let mut first = true;
-
-        // In case we have doc comments like `/**` or `/*!`, we want to remove stars if they are
-        // present. However, we first need to strip the empty lines so they don't get in the middle
-        // when we try to compute the "horizontal trim".
-        let lines = match kind {
-            CommentKind::Block => {
-                // Whatever happens, we skip the first line.
-                let mut i = lines
-                    .get(0)
-                    .map(|l| {
-                        if l.trim_start().starts_with('*') {
-                            0
-                        } else {
-                            1
-                        }
-                    })
-                    .unwrap_or(0);
-                let mut j = lines.len();
-
-                while i < j && lines[i].trim().is_empty() {
-                    i += 1;
-                }
-                while j > i && lines[j - 1].trim().is_empty() {
-                    j -= 1;
-                }
-                &lines[i..j]
-            }
-            CommentKind::Line => lines,
+impl<'s> ScriptSource<'s> {
+    pub fn parse(input: &'s str) -> CargoResult<Self> {
+        let mut source = Self {
+            shebang: None,
+            info: None,
+            frontmatter: None,
+            content: input,
         };
 
-        for line in lines {
-            for (j, c) in line.chars().enumerate() {
-                if j > i || !"* \t".contains(c) {
-                    return None;
-                }
-                if c == '*' {
-                    if first {
-                        i = j;
-                        first = false;
-                    } else if i != j {
-                        return None;
-                    }
-                    break;
-                }
+        // See rust-lang/rust's compiler/rustc_lexer/src/lib.rs's `strip_shebang`
+        // Shebang must start with `#!` literally, without any preceding whitespace.
+        // For simplicity we consider any line starting with `#!` a shebang,
+        // regardless of restrictions put on shebangs by specific platforms.
+        if let Some(rest) = source.content.strip_prefix("#!") {
+            // Ok, this is a shebang but if the next non-whitespace token is `[`,
+            // then it may be valid Rust code, so consider it Rust code.
+            if rest.trim_start().starts_with('[') {
+                return Ok(source);
             }
-            if i >= line.len() {
-                return None;
-            }
-        }
-        if lines.is_empty() {
-            None
-        } else {
-            Some(lines[0][..i].into())
-        }
-    }
 
-    let data_s = data.as_str();
-    if data_s.contains('\n') {
-        let mut lines = data_s.lines().collect::<Vec<&str>>();
-        let mut changes = false;
-        let lines = if let Some((i, j)) = get_vertical_trim(&lines) {
-            changes = true;
-            // remove whitespace-only lines from the start/end of lines
-            &mut lines[i..j]
-        } else {
-            &mut lines
+            // No other choice than to consider this a shebang.
+            let newline_end = source
+                .content
+                .find('\n')
+                .map(|pos| pos + 1)
+                .unwrap_or(source.content.len());
+            let (shebang, content) = source.content.split_at(newline_end);
+            source.shebang = Some(shebang);
+            source.content = content;
+        }
+
+        const FENCE_CHAR: char = '-';
+
+        let mut trimmed_content = source.content;
+        while !trimmed_content.is_empty() {
+            let c = trimmed_content;
+            let c = c.trim_start_matches([' ', '\t']);
+            let c = c.trim_start_matches(['\r', '\n']);
+            if c == trimmed_content {
+                break;
+            }
+            trimmed_content = c;
+        }
+        let fence_end = trimmed_content
+            .char_indices()
+            .find_map(|(i, c)| (c != FENCE_CHAR).then_some(i))
+            .unwrap_or(source.content.len());
+        let (fence_pattern, rest) = match fence_end {
+            0 => {
+                return Ok(source);
+            }
+            1 | 2 => {
+                anyhow::bail!(
+                    "found {fence_end} `{FENCE_CHAR}` in rust frontmatter, expected at least 3"
+                )
+            }
+            _ => trimmed_content.split_at(fence_end),
         };
-        if let Some(horizontal) = get_horizontal_trim(lines, kind) {
-            changes = true;
-            // remove a "[ \t]*\*" block from each line, if possible
-            for line in lines.iter_mut() {
-                if let Some(tmp) = line.strip_prefix(&horizontal) {
-                    *line = tmp;
-                    if kind == CommentKind::Block
-                        && (*line == "*" || line.starts_with("* ") || line.starts_with("**"))
-                    {
-                        *line = &line[1..];
-                    }
-                }
-            }
+        let (info, content) = rest.split_once("\n").unwrap_or((rest, ""));
+        let info = info.trim();
+        if !info.is_empty() {
+            source.info = Some(info);
         }
-        if changes {
-            return lines.join("\n");
-        }
-    }
-    data
-}
+        source.content = content;
 
-/// Removes excess indentation on comments in order for the Markdown
-/// to be parsed correctly. This is necessary because the convention for
-/// writing documentation is to provide a space between the /// or //! marker
-/// and the doc text, but Markdown is whitespace-sensitive. For example,
-/// a block of text with four-space indentation is parsed as a code block,
-/// so if we didn't unindent comments, these list items
-///
-/// /// A list:
-/// ///
-/// ///    - Foo
-/// ///    - Bar
-///
-/// would be parsed as if they were in a code block, which is likely not what the user intended.
-///
-/// See also `rustc_resolve/rustdoc.rs`
-fn unindent_doc_fragments(docs: &mut [DocFragment]) {
-    // HACK: We can't tell the difference between `#[doc]` and doc-comments, so we can't specialize
-    // the indentation like rustodc does
-    let add = 0;
-
-    // `min_indent` is used to know how much whitespaces from the start of each lines must be
-    // removed. Example:
-    //
-    // ```
-    // ///     hello!
-    // #[doc = "another"]
-    // ```
-    //
-    // In here, the `min_indent` is 1 (because non-sugared fragment are always counted with minimum
-    // 1 whitespace), meaning that "hello!" will be considered a codeblock because it starts with 4
-    // (5 - 1) whitespaces.
-    let Some(min_indent) = docs
-        .iter()
-        .map(|fragment| {
-            fragment
-                .doc
-                .as_str()
-                .lines()
-                .fold(usize::MAX, |min_indent, line| {
-                    if line.chars().all(|c| c.is_whitespace()) {
-                        min_indent
-                    } else {
-                        // Compare against either space or tab, ignoring whether they are
-                        // mixed or not.
-                        let whitespace =
-                            line.chars().take_while(|c| *c == ' ' || *c == '\t').count();
-                        min_indent.min(whitespace)
-                    }
-                })
-        })
-        .min()
-    else {
-        return;
-    };
-
-    for fragment in docs {
-        if fragment.doc.is_empty() {
-            continue;
-        }
-
-        let min_indent = if min_indent > 0 {
-            min_indent - add
-        } else {
-            min_indent
+        let Some((frontmatter, content)) = source.content.split_once(fence_pattern) else {
+            anyhow::bail!("no closing `{fence_pattern}` found for frontmatter");
         };
+        source.frontmatter = Some(frontmatter);
+        source.content = content;
 
-        fragment.indent = min_indent;
-    }
-}
-
-/// The goal of this function is to apply the `DocFragment` transformation that is required when
-/// transforming into the final Markdown, which is applying the computed indent to each line in
-/// each doc fragment (a `DocFragment` can contain multiple lines in case of `#[doc = ""]`).
-///
-/// Note: remove the trailing newline where appropriate
-///
-/// See also `rustc_resolve/rustdoc.rs`
-fn add_doc_fragment(out: &mut String, frag: &DocFragment) {
-    let s = frag.doc.as_str();
-    let mut iter = s.lines();
-    if s.is_empty() {
-        out.push('\n');
-        return;
-    }
-    while let Some(line) = iter.next() {
-        if line.chars().any(|c| !c.is_whitespace()) {
-            assert!(line.len() >= frag.indent);
-            out.push_str(&line[frag.indent..]);
-        } else {
-            out.push_str(line);
+        let (line, content) = source
+            .content
+            .split_once("\n")
+            .unwrap_or((source.content, ""));
+        let line = line.trim();
+        if !line.is_empty() {
+            anyhow::bail!("unexpected trailing content on closing fence: `{line}`");
         }
-        out.push('\n');
-    }
-}
+        source.content = content;
 
-/// Extracts the first `Cargo` fenced code block from a chunk of Markdown.
-fn extract_manifest(comment: &str) -> CargoResult<Option<String>> {
-    use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag};
-
-    // To match librustdoc/html/markdown.rs, opts.
-    let exts = Options::ENABLE_TABLES | Options::ENABLE_FOOTNOTES;
-
-    let md = Parser::new_ext(comment, exts);
-
-    let mut inside = false;
-    let mut output = None;
-
-    for item in md {
-        match item {
-            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(ref info)))
-                if info.to_lowercase() == "cargo" =>
-            {
-                if output.is_some() {
-                    anyhow::bail!("multiple `cargo` manifests present")
-                } else {
-                    output = Some(String::new());
-                }
-                inside = true;
-            }
-            Event::Text(ref text) if inside => {
-                let s = output.get_or_insert(String::new());
-                s.push_str(text);
-            }
-            Event::End(Tag::CodeBlock(_)) if inside => {
-                inside = false;
-            }
-            _ => (),
-        }
+        Ok(source)
     }
 
-    Ok(output)
+    pub fn shebang(&self) -> Option<&'s str> {
+        self.shebang
+    }
+
+    pub fn info(&self) -> Option<&'s str> {
+        self.info
+    }
+
+    pub fn frontmatter(&self) -> Option<&'s str> {
+        self.frontmatter
+    }
+
+    pub fn content(&self) -> &'s str {
+        self.content
+    }
 }
 
 #[cfg(test)]
 mod test_expand {
+    use snapbox::assert_data_eq;
+    use snapbox::prelude::*;
+    use snapbox::str;
+
     use super::*;
 
-    macro_rules! si {
-        ($i:expr) => {{
-            expand_manifest(
-                $i,
-                std::path::Path::new("/home/me/test.rs"),
-                &Config::default().unwrap(),
-            )
-            .unwrap_or_else(|err| panic!("{}", err))
-        }};
+    #[track_caller]
+    fn assert_source(source: &str, expected: impl IntoData) {
+        use std::fmt::Write as _;
+
+        let actual = match ScriptSource::parse(source) {
+            Ok(actual) => actual,
+            Err(err) => panic!("unexpected err: {err}"),
+        };
+
+        let mut rendered = String::new();
+        write_optional_field(&mut rendered, "shebang", actual.shebang());
+        write_optional_field(&mut rendered, "info", actual.info());
+        write_optional_field(&mut rendered, "frontmatter", actual.frontmatter());
+        writeln!(&mut rendered, "content: {:?}", actual.content()).unwrap();
+        assert_data_eq!(rendered, expected.raw());
+    }
+
+    fn write_optional_field(writer: &mut dyn std::fmt::Write, field: &str, value: Option<&str>) {
+        if let Some(value) = value {
+            writeln!(writer, "{field}: {value:?}").unwrap();
+        } else {
+            writeln!(writer, "{field}: None").unwrap();
+        }
+    }
+
+    #[track_caller]
+    fn assert_err(
+        result: Result<impl std::fmt::Debug, impl std::fmt::Display>,
+        err: impl IntoData,
+    ) {
+        match result {
+            Ok(d) => panic!("unexpected Ok({d:#?})"),
+            Err(actual) => snapbox::assert_data_eq!(actual.to_string(), err.raw()),
+        }
     }
 
     #[test]
-    fn test_default() {
-        snapbox::assert_eq(
-            r#"[[bin]]
+    fn split_default() {
+        assert_source(
+            r#"fn main() {}
+"#,
+            str![[r#"
+shebang: None
+info: None
+frontmatter: None
+content: "fn main() {}\n"
+
+"#]],
+        );
+    }
+
+    #[test]
+    fn split_dependencies() {
+        assert_source(
+            r#"---
+[dependencies]
+time="0.1.25"
+---
+fn main() {}
+"#,
+            str![[r#"
+shebang: None
+info: None
+frontmatter: "[dependencies]\ntime=\"0.1.25\"\n"
+content: "fn main() {}\n"
+
+"#]],
+        );
+    }
+
+    #[test]
+    fn split_infostring() {
+        assert_source(
+            r#"---cargo
+[dependencies]
+time="0.1.25"
+---
+fn main() {}
+"#,
+            str![[r#"
+shebang: None
+info: "cargo"
+frontmatter: "[dependencies]\ntime=\"0.1.25\"\n"
+content: "fn main() {}\n"
+
+"#]],
+        );
+    }
+
+    #[test]
+    fn split_infostring_whitespace() {
+        assert_source(
+            r#"--- cargo 
+[dependencies]
+time="0.1.25"
+---
+fn main() {}
+"#,
+            str![[r#"
+shebang: None
+info: "cargo"
+frontmatter: "[dependencies]\ntime=\"0.1.25\"\n"
+content: "fn main() {}\n"
+
+"#]],
+        );
+    }
+
+    #[test]
+    fn split_shebang() {
+        assert_source(
+            r#"#!/usr/bin/env cargo
+---
+[dependencies]
+time="0.1.25"
+---
+fn main() {}
+"#,
+            str![[r##"
+shebang: "#!/usr/bin/env cargo\n"
+info: None
+frontmatter: "[dependencies]\ntime=\"0.1.25\"\n"
+content: "fn main() {}\n"
+
+"##]],
+        );
+    }
+
+    #[test]
+    fn split_crlf() {
+        assert_source(
+                "#!/usr/bin/env cargo\r\n---\r\n[dependencies]\r\ntime=\"0.1.25\"\r\n---\r\nfn main() {}",
+            str![[r##"
+shebang: "#!/usr/bin/env cargo\r\n"
+info: None
+frontmatter: "[dependencies]\r\ntime=\"0.1.25\"\r\n"
+content: "fn main() {}"
+
+"##]]
+        );
+    }
+
+    #[test]
+    fn split_leading_newlines() {
+        assert_source(
+            r#"#!/usr/bin/env cargo
+    
+
+
+---
+[dependencies]
+time="0.1.25"
+---
+
+
+fn main() {}
+"#,
+            str![[r##"
+shebang: "#!/usr/bin/env cargo\n"
+info: None
+frontmatter: "[dependencies]\ntime=\"0.1.25\"\n"
+content: "\n\nfn main() {}\n"
+
+"##]],
+        );
+    }
+
+    #[test]
+    fn split_attribute() {
+        assert_source(
+            r#"#[allow(dead_code)]
+---
+[dependencies]
+time="0.1.25"
+---
+fn main() {}
+"#,
+            str![[r##"
+shebang: None
+info: None
+frontmatter: None
+content: "#[allow(dead_code)]\n---\n[dependencies]\ntime=\"0.1.25\"\n---\nfn main() {}\n"
+
+"##]],
+        );
+    }
+
+    #[test]
+    fn split_extra_dash() {
+        assert_source(
+            r#"#!/usr/bin/env cargo
+----------
+[dependencies]
+time="0.1.25"
+----------
+
+fn main() {}"#,
+            str![[r##"
+shebang: "#!/usr/bin/env cargo\n"
+info: None
+frontmatter: "[dependencies]\ntime=\"0.1.25\"\n"
+content: "\nfn main() {}"
+
+"##]],
+        );
+    }
+
+    #[test]
+    fn split_too_few_dashes() {
+        assert_err(
+            ScriptSource::parse(
+                r#"#!/usr/bin/env cargo
+--
+[dependencies]
+time="0.1.25"
+--
+fn main() {}
+"#,
+            ),
+            str!["found 2 `-` in rust frontmatter, expected at least 3"],
+        );
+    }
+
+    #[test]
+    fn split_mismatched_dashes() {
+        assert_err(
+            ScriptSource::parse(
+                r#"#!/usr/bin/env cargo
+---
+[dependencies]
+time="0.1.25"
+----
+fn main() {}
+"#,
+            ),
+            str!["unexpected trailing content on closing fence: `-`"],
+        );
+    }
+
+    #[test]
+    fn split_missing_close() {
+        assert_err(
+            ScriptSource::parse(
+                r#"#!/usr/bin/env cargo
+---
+[dependencies]
+time="0.1.25"
+fn main() {}
+"#,
+            ),
+            str!["no closing `---` found for frontmatter"],
+        );
+    }
+
+    #[track_caller]
+    fn expand(source: &str) -> String {
+        let shell = crate::Shell::from_write(Box::new(Vec::new()));
+        let cwd = std::env::current_dir().unwrap();
+        let home = home::cargo_home_with_cwd(&cwd).unwrap();
+        let gctx = GlobalContext::new(shell, cwd, home);
+        expand_manifest(source, std::path::Path::new("/home/me/test.rs"), &gctx)
+            .unwrap_or_else(|err| panic!("{}", err))
+    }
+
+    #[test]
+    fn expand_default() {
+        assert_data_eq!(
+            expand(r#"fn main() {}"#),
+            str![[r#"
+[[bin]]
 name = "test-"
-path = "test.rs"
+path = "/home/me/test.rs"
 
 [package]
 autobenches = false
 autobins = false
 autoexamples = false
+autolib = false
 autotests = false
 build = false
-edition = "2021"
+edition = "2024"
 name = "test-"
-publish = false
-version = "0.0.0"
-
-[profile.release]
-strip = true
 
 [workspace]
-"#,
-            si!(r#"fn main() {}"#),
+
+"#]]
         );
     }
 
     #[test]
-    fn test_dependencies() {
-        snapbox::assert_eq(
-            r#"[[bin]]
+    fn expand_dependencies() {
+        assert_data_eq!(
+            expand(
+                r#"---cargo
+[dependencies]
+time="0.1.25"
+---
+fn main() {}
+"#
+            ),
+            str![[r#"
+[[bin]]
 name = "test-"
-path = "test.rs"
+path = [..]
 
 [dependencies]
 time = "0.1.25"
@@ -532,373 +604,15 @@ time = "0.1.25"
 autobenches = false
 autobins = false
 autoexamples = false
+autolib = false
 autotests = false
 build = false
-edition = "2021"
+edition = "2024"
 name = "test-"
-publish = false
-version = "0.0.0"
-
-[profile.release]
-strip = true
 
 [workspace]
-"#,
-            si!(r#"
-//! ```cargo
-//! [dependencies]
-//! time="0.1.25"
-//! ```
-fn main() {}
-"#),
+
+"#]]
         );
-    }
-}
-
-#[cfg(test)]
-mod test_comment {
-    use super::*;
-
-    macro_rules! ec {
-        ($s:expr) => {
-            extract_comment($s).unwrap_or_else(|err| panic!("{}", err))
-        };
-    }
-
-    #[test]
-    fn test_no_comment() {
-        snapbox::assert_eq(
-            "no doc-comment found",
-            extract_comment(
-                r#"
-fn main () {
-}
-"#,
-            )
-            .unwrap_err()
-            .to_string(),
-        );
-    }
-
-    #[test]
-    fn test_no_comment_she_bang() {
-        snapbox::assert_eq(
-            "no doc-comment found",
-            extract_comment(
-                r#"#!/usr/bin/env cargo-eval
-
-fn main () {
-}
-"#,
-            )
-            .unwrap_err()
-            .to_string(),
-        );
-    }
-
-    #[test]
-    fn test_comment() {
-        snapbox::assert_eq(
-            r#"Here is a manifest:
-
-```cargo
-[dependencies]
-time = "*"
-```
-"#,
-            ec!(r#"//! Here is a manifest:
-//!
-//! ```cargo
-//! [dependencies]
-//! time = "*"
-//! ```
-fn main() {}
-"#),
-        );
-    }
-
-    #[test]
-    fn test_comment_shebang() {
-        snapbox::assert_eq(
-            r#"Here is a manifest:
-
-```cargo
-[dependencies]
-time = "*"
-```
-"#,
-            ec!(r#"#!/usr/bin/env cargo-eval
-
-//! Here is a manifest:
-//!
-//! ```cargo
-//! [dependencies]
-//! time = "*"
-//! ```
-fn main() {}
-"#),
-        );
-    }
-
-    #[test]
-    fn test_multiline_comment() {
-        snapbox::assert_eq(
-            r#"Here is a manifest:
-
-```cargo
-[dependencies]
-time = "*"
-```
-"#,
-            ec!(r#"/*!
-Here is a manifest:
-
-```cargo
-[dependencies]
-time = "*"
-```
-*/
-
-fn main() {
-}
-"#),
-        );
-    }
-
-    #[test]
-    fn test_multiline_comment_shebang() {
-        snapbox::assert_eq(
-            r#"Here is a manifest:
-
-```cargo
-[dependencies]
-time = "*"
-```
-"#,
-            ec!(r#"#!/usr/bin/env cargo-eval
-
-/*!
-Here is a manifest:
-
-```cargo
-[dependencies]
-time = "*"
-```
-*/
-
-fn main() {
-}
-"#),
-        );
-    }
-
-    #[test]
-    fn test_multiline_block_comment() {
-        snapbox::assert_eq(
-            r#"Here is a manifest:
-
-```cargo
-[dependencies]
-time = "*"
-```
-"#,
-            ec!(r#"/*!
- * Here is a manifest:
- *
- * ```cargo
- * [dependencies]
- * time = "*"
- * ```
- */
-fn main() {}
-"#),
-        );
-    }
-
-    #[test]
-    fn test_multiline_block_comment_shebang() {
-        snapbox::assert_eq(
-            r#"Here is a manifest:
-
-```cargo
-[dependencies]
-time = "*"
-```
-"#,
-            ec!(r#"#!/usr/bin/env cargo-eval
-
-/*!
- * Here is a manifest:
- *
- * ```cargo
- * [dependencies]
- * time = "*"
- * ```
- */
-fn main() {}
-"#),
-        );
-    }
-
-    #[test]
-    fn test_adjacent_comments() {
-        snapbox::assert_eq(
-            r#"Here is a manifest:
-
-```cargo
-[dependencies]
-time = "*"
-```
-"#,
-            ec!(r#"#!/usr/bin/env cargo-eval
-
-// I am a normal comment
-//! Here is a manifest:
-//!
-//! ```cargo
-//! [dependencies]
-//! time = "*"
-//! ```
-
-fn main () {
-}
-"#),
-        );
-    }
-
-    #[test]
-    fn test_doc_attrib() {
-        snapbox::assert_eq(
-            r#"Here is a manifest:
-
-```cargo
-[dependencies]
-time = "*"
-```
-"#,
-            ec!(r###"#!/usr/bin/env cargo-eval
-
-#![doc = r#"Here is a manifest:
-
-```cargo
-[dependencies]
-time = "*"
-```
-"#]
-
-fn main () {
-}
-"###),
-        );
-    }
-}
-
-#[cfg(test)]
-mod test_manifest {
-    use super::*;
-
-    macro_rules! smm {
-        ($c:expr) => {
-            extract_manifest($c)
-        };
-    }
-
-    #[test]
-    fn test_no_code_fence() {
-        assert_eq!(
-            smm!(
-                r#"There is no manifest in this comment.
-"#
-            )
-            .unwrap(),
-            None
-        );
-    }
-
-    #[test]
-    fn test_no_cargo_code_fence() {
-        assert_eq!(
-            smm!(
-                r#"There is no manifest in this comment.
-
-```
-This is not a manifest.
-```
-
-```rust
-println!("Nor is this.");
-```
-
-    Or this.
-"#
-            )
-            .unwrap(),
-            None
-        );
-    }
-
-    #[test]
-    fn test_cargo_code_fence() {
-        assert_eq!(
-            smm!(
-                r#"This is a manifest:
-
-```cargo
-dependencies = { time = "*" }
-```
-"#
-            )
-            .unwrap(),
-            Some(
-                r#"dependencies = { time = "*" }
-"#
-                .into()
-            )
-        );
-    }
-
-    #[test]
-    fn test_mixed_code_fence() {
-        assert_eq!(
-            smm!(
-                r#"This is *not* a manifest:
-
-```
-He's lying, I'm *totally* a manifest!
-```
-
-This *is*:
-
-```cargo
-dependencies = { time = "*" }
-```
-"#
-            )
-            .unwrap(),
-            Some(
-                r#"dependencies = { time = "*" }
-"#
-                .into()
-            )
-        );
-    }
-
-    #[test]
-    fn test_two_cargo_code_fence() {
-        assert!(smm!(
-            r#"This is a manifest:
-
-```cargo
-dependencies = { time = "*" }
-```
-
-So is this, but it doesn't count:
-
-```cargo
-dependencies = { explode = true }
-```
-"#
-        )
-        .is_err());
     }
 }

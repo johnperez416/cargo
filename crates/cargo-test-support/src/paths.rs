@@ -1,4 +1,6 @@
-use filetime::{self, FileTime};
+//! Access common paths and manipulate the filesystem
+
+use filetime::FileTime;
 
 use std::cell::RefCell;
 use std::env;
@@ -15,7 +17,7 @@ static CARGO_INTEGRATION_TEST_DIR: &str = "cit";
 static GLOBAL_ROOT: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 
 /// This is used when running cargo is pre-CARGO_TARGET_TMPDIR
-/// TODO: Remove when CARGO_TARGET_TMPDIR grows old enough.
+/// TODO: Remove when `CARGO_TARGET_TMPDIR` grows old enough.
 fn global_root_legacy() -> PathBuf {
     let mut path = t!(env::current_exe());
     path.pop(); // chop off exe name
@@ -41,6 +43,9 @@ fn set_global_root(tmp_dir: Option<&'static str>) {
     }
 }
 
+/// Path to the parent directory of all test [`root`]s
+///
+/// ex: `$CARGO_TARGET_TMPDIR/cit`
 pub fn global_root() -> PathBuf {
     let lock = GLOBAL_ROOT
         .get_or_init(|| Default::default())
@@ -64,10 +69,12 @@ thread_local! {
     static TEST_ID: RefCell<Option<usize>> = RefCell::new(None);
 }
 
+/// See [`init_root`]
 pub struct TestIdGuard {
     _private: (),
 }
 
+/// For test harnesses like [`crate::cargo_test`]
 pub fn init_root(tmp_dir: Option<&'static str>) -> TestIdGuard {
     static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
@@ -90,6 +97,9 @@ impl Drop for TestIdGuard {
     }
 }
 
+/// Path to the test's filesystem scratchpad
+///
+/// ex: `$CARGO_TARGET_TMPDIR/cit/t0`
 pub fn root() -> PathBuf {
     let id = TEST_ID.with(|n| {
         n.borrow().expect(
@@ -103,6 +113,9 @@ pub fn root() -> PathBuf {
     root
 }
 
+/// Path to the current test's `$HOME`
+///
+/// ex: `$CARGO_TARGET_TMPDIR/cit/t0/home`
 pub fn home() -> PathBuf {
     let mut path = root();
     path.push("home");
@@ -110,9 +123,23 @@ pub fn home() -> PathBuf {
     path
 }
 
+/// Path to the current test's `$CARGO_HOME`
+///
+/// ex: `$CARGO_TARGET_TMPDIR/cit/t0/home/.cargo`
+pub fn cargo_home() -> PathBuf {
+    home().join(".cargo")
+}
+
+/// Common path and file operations
 pub trait CargoPathExt {
+    fn to_url(&self) -> url::Url;
+
     fn rm_rf(&self);
     fn mkdir_p(&self);
+
+    /// Returns a list of all files and directories underneath the given
+    /// directory, recursively, including the starting path.
+    fn ls_r(&self) -> Vec<PathBuf>;
 
     fn move_into_the_past(&self) {
         self.move_in_time(|sec, nsec| (sec - 3600, nsec))
@@ -128,6 +155,10 @@ pub trait CargoPathExt {
 }
 
 impl CargoPathExt for Path {
+    fn to_url(&self) -> url::Url {
+        url::Url::from_file_path(self).ok().unwrap()
+    }
+
     fn rm_rf(&self) {
         let meta = match self.symlink_metadata() {
             Ok(meta) => meta,
@@ -153,6 +184,14 @@ impl CargoPathExt for Path {
     fn mkdir_p(&self) {
         fs::create_dir_all(self)
             .unwrap_or_else(|e| panic!("failed to mkdir_p {}: {}", self.display(), e))
+    }
+
+    fn ls_r(&self) -> Vec<PathBuf> {
+        walkdir::WalkDir::new(self)
+            .sort_by_file_name()
+            .into_iter()
+            .filter_map(|e| e.map(|e| e.path().to_owned()).ok())
+            .collect()
     }
 
     fn move_in_time<F>(&self, travel_amount: F)
@@ -199,6 +238,30 @@ impl CargoPathExt for Path {
     }
 }
 
+impl CargoPathExt for PathBuf {
+    fn to_url(&self) -> url::Url {
+        self.as_path().to_url()
+    }
+
+    fn rm_rf(&self) {
+        self.as_path().rm_rf()
+    }
+    fn mkdir_p(&self) {
+        self.as_path().mkdir_p()
+    }
+
+    fn ls_r(&self) -> Vec<PathBuf> {
+        self.as_path().ls_r()
+    }
+
+    fn move_in_time<F>(&self, travel_amount: F)
+    where
+        F: Fn(i64, u32) -> (i64, u32),
+    {
+        self.as_path().move_in_time(travel_amount)
+    }
+}
+
 fn do_op<F>(path: &Path, desc: &str, mut f: F)
 where
     F: FnMut(&Path) -> io::Result<()>,
@@ -229,18 +292,29 @@ where
 
 /// Get the filename for a library.
 ///
-/// `kind` should be one of: "lib", "rlib", "staticlib", "dylib", "proc-macro"
+/// `kind` should be one of:
+/// - `lib`
+/// - `rlib`
+/// - `staticlib`
+/// - `dylib`
+/// - `proc-macro`
 ///
-/// For example, dynamic library named "foo" would return:
-/// - macOS: "libfoo.dylib"
-/// - Windows: "foo.dll"
-/// - Unix: "libfoo.so"
+/// # Examples
+/// ```
+/// # use cargo_test_support::paths::get_lib_filename;
+/// get_lib_filename("foo", "dylib");
+/// ```
+/// would return:
+/// - macOS: `"libfoo.dylib"`
+/// - Windows: `"foo.dll"`
+/// - Unix: `"libfoo.so"`
 pub fn get_lib_filename(name: &str, kind: &str) -> String {
     let prefix = get_lib_prefix(kind);
     let extension = get_lib_extension(kind);
     format!("{}{}.{}", prefix, name, extension)
 }
 
+/// See [`get_lib_filename`] for more details
 pub fn get_lib_prefix(kind: &str) -> &str {
     match kind {
         "lib" | "rlib" => "lib",
@@ -255,6 +329,7 @@ pub fn get_lib_prefix(kind: &str) -> &str {
     }
 }
 
+/// See [`get_lib_filename`] for more details
 pub fn get_lib_extension(kind: &str) -> &str {
     match kind {
         "lib" | "rlib" => "rlib",
@@ -278,7 +353,7 @@ pub fn get_lib_extension(kind: &str) -> &str {
     }
 }
 
-/// Returns the sysroot as queried from rustc.
+/// Path to `rustc`s sysroot
 pub fn sysroot() -> String {
     let output = Command::new("rustc")
         .arg("--print=sysroot")

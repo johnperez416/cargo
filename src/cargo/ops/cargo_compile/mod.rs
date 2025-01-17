@@ -5,7 +5,7 @@
 //! rough outline is:
 //!
 //! 1. Resolve the dependency graph (see [`ops::resolve`]).
-//! 2. Download any packages needed (see [`PackageSet`].
+//! 2. Download any packages needed (see [`PackageSet`]).
 //! 3. Generate a list of top-level "units" of work for the targets the user
 //!   requested on the command-line. Each [`Unit`] corresponds to a compiler
 //!   invocation. This is done in this module ([`UnitGenerator::generate_root_units`]).
@@ -13,7 +13,7 @@
 //!   from the resolver.  See also [`unit_dependencies`].
 //! 5. Construct the [`BuildContext`] with all of the information collected so
 //!   far. This is the end of the "front end" of compilation.
-//! 6. Create a [`Context`] which coordinates the compilation process
+//! 6. Create a [`BuildRunner`] which coordinates the compilation process
 //!   and will perform the following steps:
 //!     1. Prepare the `target` directory (see [`Layout`]).
 //!     2. Create a [`JobQueue`]. The queue checks the
@@ -41,8 +41,8 @@ use std::sync::Arc;
 
 use crate::core::compiler::unit_dependencies::build_unit_dependencies;
 use crate::core::compiler::unit_graph::{self, UnitDep, UnitGraph};
-use crate::core::compiler::{standard_lib, CrateType, TargetInfo};
-use crate::core::compiler::{BuildConfig, BuildContext, Compilation, Context};
+use crate::core::compiler::{apply_env_config, standard_lib, CrateType, TargetInfo};
+use crate::core::compiler::{BuildConfig, BuildContext, BuildRunner, Compilation};
 use crate::core::compiler::{CompileKind, CompileMode, CompileTarget, RustcTargetData, Unit};
 use crate::core::compiler::{DefaultExecutor, Executor, UnitInterner};
 use crate::core::profiles::Profiles;
@@ -52,9 +52,9 @@ use crate::core::{PackageId, PackageSet, SourceId, TargetKind, Workspace};
 use crate::drop_println;
 use crate::ops;
 use crate::ops::resolve::WorkspaceResolve;
-use crate::util::config::Config;
+use crate::util::context::{GlobalContext, WarningHandling};
 use crate::util::interning::InternedString;
-use crate::util::{profile, CargoResult, StableHasher};
+use crate::util::{CargoResult, StableHasher};
 
 mod compile_filter;
 pub use compile_filter::{CompileFilter, FilterRule, LibRule};
@@ -97,15 +97,15 @@ pub struct CompileOptions {
     pub rustdoc_document_private_items: bool,
     /// Whether the build process should check the minimum Rust version
     /// defined in the cargo metadata for a crate.
-    pub honor_rust_version: bool,
+    pub honor_rust_version: Option<bool>,
 }
 
 impl CompileOptions {
-    pub fn new(config: &Config, mode: CompileMode) -> CargoResult<CompileOptions> {
+    pub fn new(gctx: &GlobalContext, mode: CompileMode) -> CargoResult<CompileOptions> {
         let jobs = None;
         let keep_going = false;
         Ok(CompileOptions {
-            build_config: BuildConfig::new(config, jobs, keep_going, &[], mode)?,
+            build_config: BuildConfig::new(gctx, jobs, keep_going, &[], mode)?,
             cli_features: CliFeatures::new_all(false),
             spec: ops::Packages::Packages(Vec::new()),
             filter: CompileFilter::Default {
@@ -115,7 +115,7 @@ impl CompileOptions {
             target_rustc_args: None,
             target_rustc_crate_types: None,
             rustdoc_document_private_items: false,
-            honor_rust_version: true,
+            honor_rust_version: None,
         })
     }
 }
@@ -138,10 +138,15 @@ pub fn compile_with_exec<'a>(
     exec: &Arc<dyn Executor>,
 ) -> CargoResult<Compilation<'a>> {
     ws.emit_warnings()?;
-    compile_ws(ws, options, exec)
+    let compilation = compile_ws(ws, options, exec)?;
+    if ws.gctx().warning_handling()? == WarningHandling::Deny && compilation.warning_count > 0 {
+        anyhow::bail!("warnings are denied by `build.warnings` configuration")
+    }
+    Ok(compilation)
 }
 
 /// Like [`compile_with_exec`] but without warnings from manifest parsing.
+#[tracing::instrument(skip_all)]
 pub fn compile_ws<'a>(
     ws: &Workspace<'a>,
     options: &CompileOptions,
@@ -150,12 +155,16 @@ pub fn compile_ws<'a>(
     let interner = UnitInterner::new();
     let bcx = create_bcx(ws, options, &interner)?;
     if options.build_config.unit_graph {
-        unit_graph::emit_serialized_unit_graph(&bcx.roots, &bcx.unit_graph, ws.config())?;
+        unit_graph::emit_serialized_unit_graph(&bcx.roots, &bcx.unit_graph, ws.gctx())?;
         return Compilation::new(&bcx);
     }
-    let _p = profile::start("compiling");
-    let cx = Context::new(&bcx)?;
-    cx.compile(exec)
+    crate::core::gc::auto_gc(bcx.gctx);
+    let build_runner = BuildRunner::new(&bcx)?;
+    if options.build_config.dry_run {
+        build_runner.dry_run()
+    } else {
+        build_runner.compile(exec)
+    }
 }
 
 /// Executes `rustc --print <VALUE>`.
@@ -171,20 +180,21 @@ pub fn print<'a>(
         ref target_rustc_args,
         ..
     } = *options;
-    let config = ws.config();
-    let rustc = config.load_global_rustc(Some(ws))?;
+    let gctx = ws.gctx();
+    let rustc = gctx.load_global_rustc(Some(ws))?;
     for (index, kind) in build_config.requested_kinds.iter().enumerate() {
         if index != 0 {
-            drop_println!(config);
+            drop_println!(gctx);
         }
-        let target_info = TargetInfo::new(config, &build_config.requested_kinds, &rustc, *kind)?;
+        let target_info = TargetInfo::new(gctx, &build_config.requested_kinds, &rustc, *kind)?;
         let mut process = rustc.process();
+        apply_env_config(gctx, &mut process)?;
         process.args(&target_info.rustflags);
         if let Some(args) = target_rustc_args {
             process.args(args);
         }
         if let CompileKind::Target(t) = kind {
-            process.arg("--target").arg(t.short_name());
+            process.arg("--target").arg(t.rustc_target());
         }
         process.arg("--print").arg(print_opt_value);
         process.exec()?;
@@ -196,11 +206,12 @@ pub fn print<'a>(
 ///
 /// For how it works and what data it collects,
 /// please see the [module-level documentation](self).
-pub fn create_bcx<'a, 'cfg>(
-    ws: &'a Workspace<'cfg>,
+#[tracing::instrument(skip_all)]
+pub fn create_bcx<'a, 'gctx>(
+    ws: &'a Workspace<'gctx>,
     options: &'a CompileOptions,
     interner: &'a UnitInterner,
-) -> CargoResult<BuildContext<'a, 'cfg>> {
+) -> CargoResult<BuildContext<'a, 'gctx>> {
     let CompileOptions {
         ref build_config,
         ref spec,
@@ -212,7 +223,7 @@ pub fn create_bcx<'a, 'cfg>(
         rustdoc_document_private_items,
         honor_rust_version,
     } = *options;
-    let config = ws.config();
+    let gctx = ws.gctx();
 
     // Perform some pre-flight validation.
     match build_config.mode {
@@ -221,21 +232,21 @@ pub fn create_bcx<'a, 'cfg>(
         | CompileMode::Check { .. }
         | CompileMode::Bench
         | CompileMode::RunCustomBuild => {
-            if ws.config().get_env("RUST_FLAGS").is_ok() {
-                config.shell().warn(
+            if ws.gctx().get_env("RUST_FLAGS").is_ok() {
+                gctx.shell().warn(
                     "Cargo does not read `RUST_FLAGS` environment variable. Did you mean `RUSTFLAGS`?",
                 )?;
             }
         }
         CompileMode::Doc { .. } | CompileMode::Doctest | CompileMode::Docscrape => {
-            if ws.config().get_env("RUSTDOC_FLAGS").is_ok() {
-                config.shell().warn(
+            if ws.gctx().get_env("RUSTDOC_FLAGS").is_ok() {
+                gctx.shell().warn(
                     "Cargo does not read `RUSTDOC_FLAGS` environment variable. Did you mean `RUSTDOCFLAGS`?"
                 )?;
             }
         }
     }
-    config.validate_term_config()?;
+    gctx.validate_term_config()?;
 
     let mut target_data = RustcTargetData::new(ws, &build_config.requested_kinds)?;
 
@@ -261,7 +272,7 @@ pub fn create_bcx<'a, 'cfg>(
             HasDevUnits::No
         }
     };
-    let max_rust_version = ws.rust_version();
+    let dry_run = false;
     let resolve = ops::resolve_ws_with_opts(
         ws,
         &mut target_data,
@@ -270,7 +281,7 @@ pub fn create_bcx<'a, 'cfg>(
         &specs,
         has_dev_units,
         crate::core::resolver::features::ForceAllTargets::No,
-        max_rust_version,
+        dry_run,
     )?;
     let WorkspaceResolve {
         mut pkg_set,
@@ -279,9 +290,14 @@ pub fn create_bcx<'a, 'cfg>(
         resolved_features,
     } = resolve;
 
-    let std_resolve_features = if let Some(crates) = &config.cli_unstable().build_std {
-        let (std_package_set, std_resolve, std_features) =
-            standard_lib::resolve_std(ws, &mut target_data, &build_config, crates)?;
+    let std_resolve_features = if let Some(crates) = &gctx.cli_unstable().build_std {
+        let (std_package_set, std_resolve, std_features) = standard_lib::resolve_std(
+            ws,
+            &mut target_data,
+            &build_config,
+            crates,
+            &build_config.requested_kinds,
+        )?;
         pkg_set.add_set(std_package_set);
         Some((std_resolve, std_features))
     } else {
@@ -303,7 +319,7 @@ pub fn create_bcx<'a, 'cfg>(
     to_builds.sort_by_key(|p| p.package_id());
 
     for pkg in to_builds.iter() {
-        pkg.manifest().print_teapot(config);
+        pkg.manifest().print_teapot(gctx);
 
         if build_config.mode.is_any_test()
             && !ws.is_member(pkg)
@@ -318,8 +334,8 @@ pub fn create_bcx<'a, 'cfg>(
     }
 
     let (extra_args, extra_args_name) = match (target_rustc_args, target_rustdoc_args) {
-        (&Some(ref args), _) => (Some(args.clone()), "rustc"),
-        (_, &Some(ref args)) => (Some(args.clone()), "rustdoc"),
+        (Some(args), _) => (Some(args.clone()), "rustc"),
+        (_, Some(args)) => (Some(args.clone()), "rustdoc"),
         _ => (None, ""),
     };
 
@@ -333,7 +349,7 @@ pub fn create_bcx<'a, 'cfg>(
     let profiles = Profiles::new(ws, build_config.requested_profile)?;
     profiles.validate_packages(
         ws.profiles(),
-        &mut config.shell(),
+        &mut gctx.shell(),
         workspace_resolve.as_ref().unwrap_or(&resolve),
     )?;
 
@@ -358,6 +374,7 @@ pub fn create_bcx<'a, 'cfg>(
     let generator = UnitGenerator {
         ws,
         packages: &to_builds,
+        target_data: &target_data,
         filter,
         requested_kinds: &build_config.requested_kinds,
         explicit_host_kind,
@@ -376,7 +393,7 @@ pub fn create_bcx<'a, 'cfg>(
         override_rustc_crate_types(&mut units, args, interner)?;
     }
 
-    let should_scrape = build_config.mode.is_doc() && config.cli_unstable().rustdoc_scrape_examples;
+    let should_scrape = build_config.mode.is_doc() && gctx.cli_unstable().rustdoc_scrape_examples;
     let mut scrape_units = if should_scrape {
         UnitGenerator {
             mode: CompileMode::Docscrape,
@@ -387,16 +404,18 @@ pub fn create_bcx<'a, 'cfg>(
         Vec::new()
     };
 
-    let std_roots = if let Some(crates) = standard_lib::std_crates(config, Some(&units)) {
+    let std_roots = if let Some(crates) = gctx.cli_unstable().build_std.as_ref() {
         let (std_resolve, std_features) = std_resolve_features.as_ref().unwrap();
         standard_lib::generate_std_roots(
             &crates,
+            &units,
             std_resolve,
             std_features,
             &explicit_host_kinds,
             &pkg_set,
             interner,
             &profiles,
+            &target_data,
         )?
     } else {
         Default::default()
@@ -419,7 +438,7 @@ pub fn create_bcx<'a, 'cfg>(
 
     // TODO: In theory, Cargo should also dedupe the roots, but I'm uncertain
     // what heuristics to use in that case.
-    if build_config.mode == (CompileMode::Doc { deps: true }) {
+    if matches!(build_config.mode, CompileMode::Doc { deps: true, .. }) {
         remove_duplicate_doc(build_config, &units, &mut unit_graph);
     }
 
@@ -427,23 +446,16 @@ pub fn create_bcx<'a, 'cfg>(
         .requested_kinds
         .iter()
         .any(CompileKind::is_host);
-    let should_share_deps = host_kind_requested
-        || config.cli_unstable().bindeps
-            && unit_graph
-                .iter()
-                .any(|(unit, _)| unit.artifact_target_for_features.is_some());
-    if should_share_deps {
-        // Rebuild the unit graph, replacing the explicit host targets with
-        // CompileKind::Host, removing `artifact_target_for_features` and merging any dependencies
-        // shared with build and artifact dependencies.
-        (units, scrape_units, unit_graph) = rebuild_unit_graph_shared(
-            interner,
-            unit_graph,
-            &units,
-            &scrape_units,
-            host_kind_requested.then_some(explicit_host_kind),
-        );
-    }
+    // Rebuild the unit graph, replacing the explicit host targets with
+    // CompileKind::Host, removing `artifact_target_for_features` and merging any dependencies
+    // shared with build and artifact dependencies.
+    (units, scrape_units, unit_graph) = rebuild_unit_graph_shared(
+        interner,
+        unit_graph,
+        &units,
+        &scrape_units,
+        host_kind_requested.then_some(explicit_host_kind),
+    );
 
     let mut extra_compiler_args = HashMap::new();
     if let Some(args) = extra_args {
@@ -479,55 +491,54 @@ pub fn create_bcx<'a, 'cfg>(
             .extend(args);
     }
 
-    if honor_rust_version {
-        // Remove any pre-release identifiers for easier comparison
-        let current_version = &target_data.rustc.version;
-        let untagged_version = semver::Version::new(
-            current_version.major,
-            current_version.minor,
-            current_version.patch,
-        );
+    if honor_rust_version.unwrap_or(true) {
+        let rustc_version = target_data.rustc.version.clone().into();
 
+        let mut incompatible = Vec::new();
+        let mut local_incompatible = false;
         for unit in unit_graph.keys() {
-            let version = match unit.pkg.rust_version() {
-                Some(v) => v,
-                None => continue,
+            let Some(pkg_msrv) = unit.pkg.rust_version() else {
+                continue;
             };
 
-            let req = version.caret_req();
-            if req.matches(&untagged_version) {
+            if pkg_msrv.is_compatible_with(&rustc_version) {
                 continue;
             }
 
-            let guidance = if ws.is_ephemeral() {
-                if ws.ignore_lock() {
-                    "Try re-running cargo install with `--locked`".to_string()
-                } else {
-                    String::new()
-                }
-            } else if !unit.is_local() {
-                format!(
-                    "Either upgrade to rustc {} or newer, or use\n\
-                     cargo update {}@{} --precise ver\n\
-                     where `ver` is the latest version of `{}` supporting rustc {}",
-                    version,
-                    unit.pkg.name(),
-                    unit.pkg.version(),
-                    unit.pkg.name(),
-                    current_version,
-                )
-            } else {
-                String::new()
-            };
+            local_incompatible |= unit.is_local();
+            incompatible.push((unit, pkg_msrv));
+        }
+        if !incompatible.is_empty() {
+            use std::fmt::Write as _;
 
-            anyhow::bail!(
-                "package `{}` cannot be built because it requires rustc {} or newer, \
-                 while the currently active rustc version is {}\n{}",
-                unit.pkg,
-                version,
-                current_version,
-                guidance,
+            let plural = if incompatible.len() == 1 { "" } else { "s" };
+            let mut message = format!(
+                "rustc {rustc_version} is not supported by the following package{plural}:\n"
             );
+            incompatible.sort_by_key(|(unit, _)| (unit.pkg.name(), unit.pkg.version()));
+            for (unit, msrv) in incompatible {
+                let name = &unit.pkg.name();
+                let version = &unit.pkg.version();
+                writeln!(&mut message, "  {name}@{version} requires rustc {msrv}").unwrap();
+            }
+            if ws.is_ephemeral() {
+                if ws.ignore_lock() {
+                    writeln!(
+                        &mut message,
+                        "Try re-running `cargo install` with `--locked`"
+                    )
+                    .unwrap();
+                }
+            } else if !local_incompatible {
+                writeln!(
+                    &mut message,
+                    "Either upgrade rustc or select compatible dependency versions with
+`cargo update <name>@<current-ver> --precise <compatible-ver>`
+where `<compatible-ver>` is the latest version supporting rustc {rustc_version}",
+                )
+                .unwrap();
+            }
+            return Err(anyhow::Error::msg(message));
         }
     }
 
@@ -546,7 +557,8 @@ pub fn create_bcx<'a, 'cfg>(
     Ok(bcx)
 }
 
-/// This is used to rebuild the unit graph, sharing host dependencies if possible.
+/// This is used to rebuild the unit graph, sharing host dependencies if possible,
+/// and applying other unit adjustments based on the whole graph.
 ///
 /// This will translate any unit's `CompileKind::Target(host)` to
 /// `CompileKind::Host` if `to_host` is not `None` and the kind is equal to `to_host`.
@@ -568,6 +580,14 @@ pub fn create_bcx<'a, 'cfg>(
 /// to the `Unit`, this allows the `CompileKind` to be changed back to `Host`
 /// and `artifact_target_for_features` to be removed without fear of an unwanted
 /// collision for build or artifact dependencies.
+///
+/// This is also responsible for adjusting the `strip` profile option to
+/// opportunistically strip if debug is 0 for all dependencies. This helps
+/// remove debuginfo added by the standard library.
+///
+/// This is also responsible for adjusting the `debug` setting for host
+/// dependencies, turning off debug if the user has not explicitly enabled it,
+/// and the unit is not shared with a target unit.
 fn rebuild_unit_graph_shared(
     interner: &UnitInterner,
     unit_graph: UnitGraph,
@@ -643,7 +663,7 @@ fn traverse_and_share(
         .collect();
     // Here, we have recursively traversed this unit's dependencies, and hashed them: we can
     // finalize the dep hash.
-    let new_dep_hash = dep_hash.finish();
+    let new_dep_hash = Hasher::finish(&dep_hash);
 
     // This is the key part of the sharing process: if the unit is a runtime dependency, whose
     // target is the same as the host, we canonicalize the compile kind to `CompileKind::Host`.
@@ -657,6 +677,18 @@ fn traverse_and_share(
     };
 
     let mut profile = unit.profile.clone();
+    if profile.strip.is_deferred() {
+        // If strip was not manually set, and all dependencies of this unit together
+        // with this unit have debuginfo turned off, we enable debuginfo stripping.
+        // This will remove pre-existing debug symbols coming from the standard library.
+        if !profile.debuginfo.is_turned_on()
+            && new_deps
+                .iter()
+                .all(|dep| !dep.unit.profile.debuginfo.is_turned_on())
+        {
+            profile.strip = profile.strip.strip_debuginfo();
+        }
+    }
 
     // If this is a build dependency, and it's not shared with runtime dependencies, we can weaken
     // its debuginfo level to optimize build times. We do nothing if it's an artifact dependency,
@@ -679,6 +711,9 @@ fn traverse_and_share(
             to_host.unwrap(),
             unit.mode,
             unit.features.clone(),
+            unit.rustflags.clone(),
+            unit.rustdocflags.clone(),
+            unit.links_overrides.clone(),
             unit.is_std,
             unit.dep_hash,
             unit.artifact,
@@ -704,6 +739,9 @@ fn traverse_and_share(
         canonical_kind,
         unit.mode,
         unit.features.clone(),
+        unit.rustflags.clone(),
+        unit.rustdocflags.clone(),
+        unit.links_overrides.clone(),
         unit.is_std,
         new_dep_hash,
         unit.artifact,
@@ -716,7 +754,7 @@ fn traverse_and_share(
     new_unit
 }
 
-/// Removes duplicate CompileMode::Doc units that would cause problems with
+/// Removes duplicate `CompileMode::Doc` units that would cause problems with
 /// filename collisions.
 ///
 /// Rustdoc only separates units by crate name in the file directory
@@ -865,6 +903,9 @@ fn override_rustc_crate_types(
             unit.kind,
             unit.mode,
             unit.features.clone(),
+            unit.rustflags.clone(),
+            unit.rustdocflags.clone(),
+            unit.links_overrides.clone(),
             unit.is_std,
             unit.dep_hash,
             unit.artifact,

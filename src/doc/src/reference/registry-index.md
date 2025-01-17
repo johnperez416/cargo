@@ -1,4 +1,4 @@
-## Index Format
+# Index Format
 
 The following defines the format of the index. New features are occasionally
 added, which are only understood starting with the version of Cargo that
@@ -6,7 +6,7 @@ introduced them. Older versions of Cargo may not be able to use packages that
 make use of new features. However, the format for older packages should not
 change, so older versions of Cargo should be able to use them.
 
-### Index Configuration
+## Index Configuration
 The root of the index contains a file named `config.json` which contains JSON
 information used by Cargo for accessing the registry. This is an example of
 what the [crates.io] config file looks like:
@@ -35,16 +35,21 @@ The keys are:
 - `api`: This is the base URL for the web API. This key is optional, but if it
   is not specified, commands such as [`cargo publish`] will not work. The web
   API is described below.
+- `auth-required`: indicates whether this is a private registry that requires
+  all operations to be authenticated including API requests, crate downloads
+  and sparse index updates.
 
 
-### Download Endpoint
+## Download Endpoint
 The download endpoint should send the `.crate` file for the requested package.
 Cargo supports https, http, and file URLs, HTTP redirects, HTTP1 and HTTP2.
 The exact specifics of TLS support depend on the platform that Cargo is
 running on, the version of Cargo, and how it was compiled.
 
+If `auth-required: true` is set in `config.json`, the `Authorization` header
+will be included with http(s) download requests.
 
-### Index files
+## Index files
 The rest of the index repository contains one file for each package, where the
 filename is the name of the package in lowercase. Each version of the package
 has a separate line in the file. The files are organized in a tier of
@@ -80,7 +85,7 @@ harder to support older versions of Cargo that lack `{prefix}`/`{lowerprefix}`.
 For example, nginx rewrite rules can easily construct `{prefix}` but can't
 perform case-conversion to construct `{lowerprefix}`.
 
-### Name restrictions
+## Name restrictions
 
 Registries should consider enforcing limitations on package names added to
 their index. Cargo itself allows names with any [alphanumeric], `-`, or `_`
@@ -100,13 +105,13 @@ attacks](https://en.wikipedia.org/wiki/IDN_homograph_attack) and other
 concerns in [UTR36](https://www.unicode.org/reports/tr36/) and
 [UTS39](https://www.unicode.org/reports/tr39/).
 
-### Version uniqueness
+## Version uniqueness
 
 Indexes *must* ensure that each version only appears once for each package.
 This includes ignoring SemVer build metadata.
 For example, the index must *not* contain two entries with a version `1.0.7` and `1.0.7+extra`.
 
-### JSON schema
+## JSON schema
 
 Each line in a package file contains a JSON object that describes a published
 version of the package. The following is a pretty-printed example with comments
@@ -134,27 +139,28 @@ explaining the format of the entry.
             // https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html.
             "req": "^0.6",
             // Array of features (as strings) enabled for this dependency.
+            // May be omitted since Cargo 1.84.
             "features": ["i128_support"],
             // Boolean of whether or not this is an optional dependency.
+            // Since Cargo 1.84, defaults to `false` if not specified.
             "optional": false,
             // Boolean of whether or not default features are enabled.
+            // Since Cargo 1.84, defaults to `true` if not specified.
             "default_features": true,
             // The target platform for the dependency.
-            // null if not a target dependency.
+            // If not specified or `null`, it is not a target dependency.
             // Otherwise, a string such as "cfg(windows)".
             "target": null,
             // The dependency kind.
             // "dev", "build", or "normal".
-            // Note: this is a required field, but a small number of entries
-            // exist in the crates.io index with either a missing or null
-            // `kind` field due to implementation bugs.
+            // If not specified or `null`, it defaults to "normal".
             "kind": "normal",
             // The URL of the index of the registry where this dependency is
-            // from as a string. If not specified or null, it is assumed the
+            // from as a string. If not specified or `null`, it is assumed the
             // dependency is in the current registry.
             "registry": null,
             // If the dependency is renamed, this is a string of the actual
-            // package name. If not specified or null, this dependency is not
+            // package name. If not specified or `null`, this dependency is not
             // renamed.
             "package": null,
         }
@@ -163,6 +169,7 @@ explaining the format of the entry.
     "cksum": "d867001db0e2b6e0496f9fac96930e2d42233ecd3ca0413e0753d4c7695d289c",
     // Set of features defined for the package.
     // Each feature maps to an array of features or dependencies it enables.
+    // May be omitted since Cargo 1.84.
     "features": {
         "extras": ["rand/simd_support"]
     },
@@ -174,7 +181,7 @@ explaining the format of the entry.
     // An unsigned 32-bit integer value indicating the schema version of this
     // entry.
     //
-    // If this not specified, it should be interpreted as the default of 1.
+    // If this is not specified, it should be interpreted as the default of 1.
     //
     // Cargo (starting with version 1.51) will ignore versions it does not
     // recognize. This provides a method to safely introduce changes to index
@@ -254,19 +261,19 @@ The JSON objects should not be modified after they are added except for the
 [Publish API]: registry-web-api.md#publish
 [`cargo metadata`]: ../commands/cargo-metadata.md
 
-### Index Protocols
+## Index Protocols
 Cargo supports two remote registry protocols: `git` and `sparse`. The `git` protocol
 stores index files in a git repository and the `sparse` protocol fetches individual
 files over HTTP.
 
-#### Git Protocol
+### Git Protocol
 The git protocol has no protocol prefix in the index url. For example the git index URL
 for [crates.io] is `https://github.com/rust-lang/crates.io-index`.
 
 Cargo caches the git repository on disk so that it can efficiently incrementally fetch
 updates.
 
-#### Sparse Protocol
+### Sparse Protocol
 The sparse protocol uses the `sparse+` protocol prefix in the registry URL. For example,
 the sparse index URL for [crates.io] is `sparse+https://index.crates.io/`.
 
@@ -274,24 +281,36 @@ The sparse protocol downloads each index file using an individual HTTP request. 
 this results in a large number of small HTTP requests, performance is significantly
 improved with a server that supports pipelining and HTTP/2.
 
-##### Caching
+#### Sparse authentication
+Cargo will attempt to fetch the `config.json` file before
+fetching any other files. If the server responds with an HTTP 401, then Cargo will assume
+that the registry requires authentication and re-attempt the request for `config.json`
+with the authentication token included.
+
+On authentication failure (or a missing authentication token) the server may include a
+`www-authenticate` header with a `Cargo login_url="<URL>"` challenge to indicate where the user
+can go to get a token.
+
+Registries that require authentication must set `auth-required: true` in `config.json`.
+
+#### Caching
 Cargo caches the crate metadata files, and captures the `ETag` or `Last-Modified` 
 HTTP header from the server for each entry. When refreshing crate metadata, Cargo
 sends the `If-None-Match` or `If-Modified-Since` header to allow the server to respond
 with HTTP 304 "Not Modified" if the local cache is valid, saving time and bandwidth.
 If both `ETag` and `Last-Modified` headers are present, Cargo uses the `ETag` only.
 
-##### Cache Invalidation
+#### Cache Invalidation
 If a registry is using some kind of CDN or proxy which caches access to the index files,
 then it is recommended that registries implement some form of cache invalidation when
 the files are updated. If these caches are not updated, then users may not be able to
 access new crates until the cache is cleared.
 
-##### Nonexistent Crates
+#### Nonexistent Crates
 For crates that do not exist, the registry should respond with a 404 "Not Found", 410 "Gone"
 or 451 "Unavailable For Legal Reasons" code.
 
-##### Sparse Limitations
+#### Sparse Limitations
 Since the URL of the registry is stored in the lockfile, it's not recommended to offer
 a registry with both protocols. Discussion about a transition plan is ongoing in issue 
 [#10964]. The [crates.io] registry is an exception, since Cargo internally substitutes

@@ -10,22 +10,30 @@ use std::io::IsTerminal;
 use crate::util::auth;
 use crate::util::auth::AuthorizationError;
 use crate::CargoResult;
-use crate::Config;
+use crate::GlobalContext;
 use cargo_credential::LoginOptions;
 use cargo_credential::Secret;
 
 use super::get_source_id;
 use super::registry;
+use super::RegistryOrIndex;
 
 pub fn registry_login(
-    config: &Config,
+    gctx: &GlobalContext,
     token_from_cmdline: Option<Secret<&str>>,
-    reg: Option<&str>,
+    reg_or_index: Option<&RegistryOrIndex>,
     args: &[&str],
 ) -> CargoResult<()> {
-    let source_ids = get_source_id(config, None, reg)?;
+    let source_ids = get_source_id(gctx, reg_or_index)?;
 
-    let login_url = match registry(config, token_from_cmdline.clone(), None, reg, false, None) {
+    let login_url = match registry(
+        gctx,
+        &source_ids,
+        token_from_cmdline.clone(),
+        reg_or_index,
+        false,
+        None,
+    ) {
         Ok((registry, _)) => Some(format!("{}/me", registry.host())),
         Err(e) if e.is::<AuthorizationError>() => e
             .downcast::<AuthorizationError>()
@@ -38,7 +46,7 @@ pub fn registry_login(
     let mut token_from_stdin = None;
     let token = token_from_cmdline.or_else(|| {
         if !std::io::stdin().is_terminal() {
-            let token = std::io::read_to_string(std::io::stdin()).unwrap_or_default();
+            let token = cargo_credential::read_line().unwrap_or_default();
             if !token.is_empty() {
                 token_from_stdin = Some(token);
             }
@@ -51,6 +59,6 @@ pub fn registry_login(
         login_url: login_url.as_deref(),
     };
 
-    auth::login(config, &source_ids.original, options, args)?;
+    auth::login(gctx, &source_ids.original, options, args)?;
     Ok(())
 }

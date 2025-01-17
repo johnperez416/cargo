@@ -1,61 +1,94 @@
+//! Types that hold source information for a group of packages.
+//!
+//! The primary type you're looking for is [`PackageRegistry`]. It is an
+//! abstraction over multiple [`Source`]s. [`PackageRegistry`] also implements
+//! the [`Registry`] trait, allowing a dependency resolver to query necessary
+//! package metadata (i.e., [Summary]) from it.
+//!
+//! Not to be confused with [`crate::sources::registry`] and [`crate::ops::registry`].
+//! The former is just one kind of source,
+//! while the latter involves operations on the registry Web API.
+
 use std::collections::{HashMap, HashSet};
 use std::task::{ready, Poll};
 
 use crate::core::PackageSet;
-use crate::core::{Dependency, PackageId, QueryKind, Source, SourceId, SourceMap, Summary};
+use crate::core::{Dependency, PackageId, SourceId, Summary};
 use crate::sources::config::SourceConfigMap;
+use crate::sources::source::QueryKind;
+use crate::sources::source::Source;
+use crate::sources::source::SourceMap;
+use crate::sources::IndexSummary;
 use crate::util::errors::CargoResult;
 use crate::util::interning::InternedString;
-use crate::util::{CanonicalUrl, Config};
+use crate::util::{CanonicalUrl, GlobalContext};
 use anyhow::{bail, Context as _};
 use tracing::{debug, trace};
 use url::Url;
 
-/// Source of information about a group of packages.
+/// An abstraction provides a set of methods for querying source information
+/// about a group of packages, without leaking too much implementation details
+/// of the actual registry.
 ///
-/// See also `core::Source`.
+/// As of 2024-04, only [`PackageRegistry`] and `MyRegistry` in resolver-tests
+/// are found implementing this.
+///
+/// See also the [`Source`] trait, as many of the methods here mirror and
+/// abstract over its functionalities.
 pub trait Registry {
     /// Attempt to find the packages that match a dependency request.
     fn query(
         &mut self,
         dep: &Dependency,
         kind: QueryKind,
-        f: &mut dyn FnMut(Summary),
+        f: &mut dyn FnMut(IndexSummary),
     ) -> Poll<CargoResult<()>>;
 
-    fn query_vec(&mut self, dep: &Dependency, kind: QueryKind) -> Poll<CargoResult<Vec<Summary>>> {
+    /// Gathers the result from [`Registry::query`] as a list of [`IndexSummary`] items
+    /// when they become available.
+    fn query_vec(
+        &mut self,
+        dep: &Dependency,
+        kind: QueryKind,
+    ) -> Poll<CargoResult<Vec<IndexSummary>>> {
         let mut ret = Vec::new();
         self.query(dep, kind, &mut |s| ret.push(s)).map_ok(|()| ret)
     }
 
+    /// Gets the description of a source, to provide useful messages.
     fn describe_source(&self, source: SourceId) -> String;
+
+    /// Checks if a source is replaced with some other source.
     fn is_replaced(&self, source: SourceId) -> bool;
 
-    /// Block until all outstanding Poll::Pending requests are Poll::Ready.
+    /// Block until all outstanding [`Poll::Pending`] requests are [`Poll::Ready`].
     fn block_until_ready(&mut self) -> CargoResult<()>;
 }
 
 /// This structure represents a registry of known packages. It internally
-/// contains a number of `Box<Source>` instances which are used to load a
-/// `Package` from.
+/// contains a number of [`Source`] instances which are used to load a
+/// [`Package`] from.
 ///
 /// The resolution phase of Cargo uses this to drive knowledge about new
-/// packages as well as querying for lists of new packages. It is here that
-/// sources are updated (e.g., network operations) and overrides are
-/// handled.
+/// packages as well as querying for lists of new packages.
+/// It is here that sources are updated (e.g., network operations) and
+/// overrides/patches are handled.
 ///
 /// The general idea behind this registry is that it is centered around the
-/// `SourceMap` structure, contained within which is a mapping of a `SourceId` to
-/// a `Source`. Each `Source` in the map has been updated (using network
+/// [`SourceMap`] structure, contained within which is a mapping of a [`SourceId`]
+/// to a [`Source`]. Each [`Source`] in the map has been updated (using network
 /// operations if necessary) and is ready to be queried for packages.
-pub struct PackageRegistry<'cfg> {
-    config: &'cfg Config,
-    sources: SourceMap<'cfg>,
+///
+/// [`Package`]: crate::core::Package
+pub struct PackageRegistry<'gctx> {
+    gctx: &'gctx GlobalContext,
+    sources: SourceMap<'gctx>,
 
-    // A list of sources which are considered "overrides" which take precedent
-    // when querying for packages.
+    /// A list of sources which are considered "path-overrides" which take
+    /// precedent when querying for packages.
     overrides: Vec<SourceId>,
 
+    /// Use for tracking sources that are already loaded into the registry.
     // Note that each SourceId does not take into account its `precise` field
     // when hashing or testing for equality. When adding a new `SourceId`, we
     // want to avoid duplicates in the `SourceMap` (to prevent re-updating the
@@ -73,12 +106,30 @@ pub struct PackageRegistry<'cfg> {
     // what exactly the key is.
     source_ids: HashMap<SourceId, (SourceId, Kind)>,
 
+    /// This is constructed via [`PackageRegistry::register_lock`].
+    /// See also [`LockedMap`].
     locked: LockedMap,
+    /// A group of packages tha allows to use even when yanked.
     yanked_whitelist: HashSet<PackageId>,
-    source_config: SourceConfigMap<'cfg>,
+    source_config: SourceConfigMap<'gctx>,
 
+    /// Patches registered during calls to [`PackageRegistry::patch`].
+    ///
+    /// These are available for `query` after calling [`PackageRegistry::lock_patches`],
+    /// which `lock`s them all to specific versions.
     patches: HashMap<CanonicalUrl, Vec<Summary>>,
+    /// Whether patches are locked. That is, they are available to resolution.
+    ///
+    /// See [`PackageRegistry::lock_patches`] and [`PackageRegistry::patch`] for more.
     patches_locked: bool,
+    /// Patches available for each source.
+    ///
+    /// This is for determining whether a dependency entry from a lockfile
+    /// happened through `[patch]`, during calls to [`lock`] to rewrite
+    /// summaries to point directly at these patched entries.
+    ///
+    /// This is constructed during calls to [`PackageRegistry::patch`],
+    /// along with the `patches` field, thoough these entries never get locked.
     patches_available: HashMap<CanonicalUrl, Vec<PackageId>>,
 }
 
@@ -102,18 +153,36 @@ type LockedMap = HashMap<
     Vec<(PackageId, Vec<PackageId>)>,
 >;
 
+/// Kinds of sources a [`PackageRegistry`] has loaded.
 #[derive(PartialEq, Eq, Clone, Copy)]
 enum Kind {
+    /// A source from a [path override].
+    ///
+    /// [path overrides]: https://doc.rust-lang.org/nightly/cargo/reference/overriding-dependencies.html#paths-overrides
     Override,
+    /// A source that is locked and not going to change.
+    ///
+    /// For example, sources of workspace members are loaded during the
+    /// workspace initialization, so not allowed to change.
     Locked,
+    /// A source that is not locked nor a path-override.
     Normal,
 }
 
-/// Argument to `PackageRegistry::patch` which is information about a `[patch]`
+/// This tuple is an argument to [`PackageRegistry::patch`].
+///
+/// * The first element is the patch definition straight from the manifest.
+/// * The second element is an optional variant where the patch has been locked.
+///   It is the patch locked to a specific version found in Cargo.lock.
+///   This will be `None` if `Cargo.lock` doesn't exist,
+///   or the patch did not match any existing entries in `Cargo.lock`.
+pub type PatchDependency<'a> = (&'a Dependency, Option<LockedPatchDependency>);
+
+/// Argument to [`PackageRegistry::patch`] which is information about a `[patch]`
 /// directive that we found in a lockfile, if present.
 pub struct LockedPatchDependency {
     /// The original `Dependency` directive, except "locked" so it's version
-    /// requirement is `=foo` and its `SourceId` has a "precise" listed.
+    /// requirement is Locked to `foo` and its `SourceId` has a "precise" listed.
     pub dependency: Dependency,
     /// The `PackageId` that was previously found in a lock file which
     /// `dependency` matches.
@@ -124,11 +193,13 @@ pub struct LockedPatchDependency {
     pub alt_package_id: Option<PackageId>,
 }
 
-impl<'cfg> PackageRegistry<'cfg> {
-    pub fn new(config: &'cfg Config) -> CargoResult<PackageRegistry<'cfg>> {
-        let source_config = SourceConfigMap::new(config)?;
+impl<'gctx> PackageRegistry<'gctx> {
+    pub fn new_with_source_config(
+        gctx: &'gctx GlobalContext,
+        source_config: SourceConfigMap<'gctx>,
+    ) -> CargoResult<PackageRegistry<'gctx>> {
         Ok(PackageRegistry {
-            config,
+            gctx,
             sources: SourceMap::new(),
             source_ids: HashMap::new(),
             overrides: Vec::new(),
@@ -141,11 +212,13 @@ impl<'cfg> PackageRegistry<'cfg> {
         })
     }
 
-    pub fn get(self, package_ids: &[PackageId]) -> CargoResult<PackageSet<'cfg>> {
+    pub fn get(self, package_ids: &[PackageId]) -> CargoResult<PackageSet<'gctx>> {
         trace!("getting packages; sources={}", self.sources.len());
-        PackageSet::new(package_ids, self.sources, self.config)
+        PackageSet::new(package_ids, self.sources, self.gctx)
     }
 
+    /// Ensures the [`Source`] of the given [`SourceId`] is loaded.
+    /// If not, this will block until the source is ready.
     fn ensure_loaded(&mut self, namespace: SourceId, kind: Kind) -> CargoResult<()> {
         match self.source_ids.get(&namespace) {
             // We've previously loaded this source, and we've already locked it,
@@ -158,16 +231,16 @@ impl<'cfg> PackageRegistry<'cfg> {
 
             // If the previous source was not a precise source, then we can be
             // sure that it's already been updated if we've already loaded it.
-            Some((previous, _)) if previous.precise().is_none() => {
+            Some((previous, _)) if !previous.has_precise() => {
                 debug!("load/precise  {}", namespace);
                 return Ok(());
             }
 
             // If the previous source has the same precise version as we do,
-            // then we're done, otherwise we need to need to move forward
+            // then we're done, otherwise we need to move forward
             // updating this source.
             Some((previous, _)) => {
-                if previous.precise() == namespace.precise() {
+                if previous.has_same_precise_as(namespace) {
                     debug!("load/match    {}", namespace);
                     return Ok(());
                 }
@@ -195,21 +268,28 @@ impl<'cfg> PackageRegistry<'cfg> {
         Ok(())
     }
 
-    pub fn add_preloaded(&mut self, source: Box<dyn Source + 'cfg>) {
+    /// Adds a source which will be locked.
+    /// Useful for path sources such as the source of a workspace member.
+    pub fn add_preloaded(&mut self, source: Box<dyn Source + 'gctx>) {
         self.add_source(source, Kind::Locked);
     }
 
-    fn add_source(&mut self, source: Box<dyn Source + 'cfg>, kind: Kind) {
+    /// Adds a source to the registry.
+    fn add_source(&mut self, source: Box<dyn Source + 'gctx>, kind: Kind) {
         let id = source.source_id();
         self.sources.insert(source);
         self.source_ids.insert(id, (id, kind));
     }
 
-    pub fn add_override(&mut self, source: Box<dyn Source + 'cfg>) {
+    /// Adds a source from a [path override].
+    ///
+    /// [path override]: https://doc.rust-lang.org/nightly/cargo/reference/overriding-dependencies.html#paths-overrides
+    pub fn add_override(&mut self, source: Box<dyn Source + 'gctx>) {
         self.overrides.push(source.source_id());
         self.add_source(source, Kind::Override);
     }
 
+    /// Allows a group of package to be available to query even if they are yanked.
     pub fn add_to_yanked_whitelist(&mut self, iter: impl Iterator<Item = PackageId>) {
         let pkgs = iter.collect::<Vec<_>>();
         for (_, source) in self.sources.sources_mut() {
@@ -224,6 +304,8 @@ impl<'cfg> PackageRegistry<'cfg> {
         self.locked = HashMap::new();
     }
 
+    /// Registers one "locked package" to the registry, for guiding the
+    /// dependency resolution. See [`LockedMap`] for more.
     pub fn register_lock(&mut self, id: PackageId, deps: Vec<PackageId>) {
         trace!("register_lock: {}", id);
         for dep in deps.iter() {
@@ -244,26 +326,21 @@ impl<'cfg> PackageRegistry<'cfg> {
     /// The `deps` is an array of all the entries in the `[patch]` section of
     /// the manifest.
     ///
-    /// Here the `deps` will be resolved to a precise version and stored
-    /// internally for future calls to `query` below. `deps` should be a tuple
-    /// where the first element is the patch definition straight from the
-    /// manifest, and the second element is an optional variant where the
-    /// patch has been locked. This locked patch is the patch locked to
-    /// a specific version found in Cargo.lock. This will be `None` if
-    /// `Cargo.lock` doesn't exist, or the patch did not match any existing
-    /// entries in `Cargo.lock`.
+    /// Here the `patch_deps` will be resolved to a precise version and stored
+    /// internally for future calls to `query` below.
     ///
     /// Note that the patch list specified here *will not* be available to
-    /// `query` until `lock_patches` is called below, which should be called
-    /// once all patches have been added.
+    /// [`Registry::query`] until [`PackageRegistry::lock_patches`] is called
+    /// below, which should be called once all patches have been added.
     ///
     /// The return value is a `Vec` of patches that should *not* be locked.
     /// This happens when the patch is locked, but the patch has been updated
     /// so the locked value is no longer correct.
+    #[tracing::instrument(skip(self, patch_deps))]
     pub fn patch(
         &mut self,
         url: &Url,
-        deps: &[(&Dependency, Option<LockedPatchDependency>)],
+        patch_deps: &[PatchDependency<'_>],
     ) -> CargoResult<Vec<(Dependency, PackageId)>> {
         // NOTE: None of this code is aware of required features. If a patch
         // is missing a required feature, you end up with an "unused patch"
@@ -274,9 +351,9 @@ impl<'cfg> PackageRegistry<'cfg> {
         // Return value of patches that shouldn't be locked.
         let mut unlock_patches = Vec::new();
 
-        // First up we need to actually resolve each `deps` specification to
-        // precisely one summary. We're not using the `query` method below as it
-        // internally uses maps we're building up as part of this method
+        // First up we need to actually resolve each `patch_deps` specification
+        // to precisely one summary. We're not using the `query` method below
+        // as it internally uses maps we're building up as part of this method
         // (`patches_available` and `patches`). Instead we're going straight to
         // the source to load information from it.
         //
@@ -284,12 +361,12 @@ impl<'cfg> PackageRegistry<'cfg> {
         // precisely one package, so that's why we're just creating a flat list
         // of summaries which should be the same length as `deps` above.
 
-        let mut deps_remaining: Vec<_> = deps.iter().collect();
+        let mut patch_deps_remaining: Vec<_> = patch_deps.iter().collect();
         let mut unlocked_summaries = Vec::new();
-        while !deps_remaining.is_empty() {
-            let mut deps_pending = Vec::new();
-            for dep_remaining in deps_remaining {
-                let (orig_patch, locked) = dep_remaining;
+        while !patch_deps_remaining.is_empty() {
+            let mut patch_deps_pending = Vec::new();
+            for patch_dep_remaining in patch_deps_remaining {
+                let (orig_patch, locked) = patch_dep_remaining;
 
                 // Use the locked patch if it exists, otherwise use the original.
                 let dep = match locked {
@@ -303,7 +380,7 @@ impl<'cfg> PackageRegistry<'cfg> {
                 );
 
                 if dep.features().len() != 0 || !dep.uses_default_features() {
-                    self.source_config.config().shell().warn(format!(
+                    self.source_config.gctx().shell().warn(format!(
                         "patch for `{}` uses the features mechanism. \
                         default-features and features will not take effect because the patch dependency does not support this mechanism",
                         dep.package_name()
@@ -329,16 +406,18 @@ impl<'cfg> PackageRegistry<'cfg> {
                 let summaries = match source.query_vec(dep, QueryKind::Exact)? {
                     Poll::Ready(deps) => deps,
                     Poll::Pending => {
-                        deps_pending.push(dep_remaining);
+                        patch_deps_pending.push(patch_dep_remaining);
                         continue;
                     }
                 };
+
+                let summaries = summaries.into_iter().map(|s| s.into_summary()).collect();
 
                 let (summary, should_unlock) =
                     match summary_for_patch(orig_patch, &locked, summaries, source) {
                         Poll::Ready(x) => x,
                         Poll::Pending => {
-                            deps_pending.push(dep_remaining);
+                            patch_deps_pending.push(patch_dep_remaining);
                             continue;
                         }
                     }
@@ -365,13 +444,13 @@ impl<'cfg> PackageRegistry<'cfg> {
                         patches must point to different sources",
                         dep.package_name(),
                         url
-                    ))
-                    .context(format!("failed to resolve patches for `{}`", url));
+                    )
+                    .context(format!("failed to resolve patches for `{}`", url)));
                 }
                 unlocked_summaries.push(summary);
             }
 
-            deps_remaining = deps_pending;
+            patch_deps_remaining = patch_deps_pending;
             self.block_until_ready()?;
         }
 
@@ -389,25 +468,18 @@ impl<'cfg> PackageRegistry<'cfg> {
             }
         }
 
-        // Calculate a list of all patches available for this source which is
-        // then used later during calls to `lock` to rewrite summaries to point
-        // directly at these patched entries.
-        //
-        // Note that this is somewhat subtle where the list of `ids` for a
-        // canonical URL is extend with possibly two ids per summary. This is done
-        // to handle the transition from the v2->v3 lock file format where in
-        // v2 DefeaultBranch was either DefaultBranch or Branch("master") for
-        // git dependencies. In this case if `summary.package_id()` is
-        // Branch("master") then alt_package_id will be DefaultBranch. This
-        // signifies that there's a patch available for either of those
-        // dependency directives if we see them in the dependency graph.
-        //
-        // This is a bit complicated and hopefully an edge case we can remove
-        // in the future, but for now it hopefully doesn't cause too much
-        // harm...
+        // Calculate a list of all patches available for this source.
         let mut ids = Vec::new();
-        for (summary, (_, lock)) in unlocked_summaries.iter().zip(deps) {
+        for (summary, (_, lock)) in unlocked_summaries.iter().zip(patch_deps) {
             ids.push(summary.package_id());
+            // This is subtle where the list of `ids` for a canonical URL is
+            // extend with possibly two ids per summary. This is done to handle
+            // the transition from the v2->v3 lock file format where in v2
+            // DefaultBranch was either DefaultBranch or Branch("master") for
+            // git dependencies. In this case if `summary.package_id()` is
+            // Branch("master") then alt_package_id will be DefaultBranch. This
+            // signifies that there's a patch available for either of those
+            // dependency directives if we see them in the dependency graph.
             if let Some(lock) = lock {
                 ids.extend(lock.alt_package_id);
             }
@@ -424,13 +496,8 @@ impl<'cfg> PackageRegistry<'cfg> {
         Ok(unlock_patches)
     }
 
-    /// Lock all patch summaries added via `patch`, making them available to
-    /// resolution via `query`.
-    ///
-    /// This function will internally `lock` each summary added via `patch`
-    /// above now that the full set of `patch` packages are known. This'll allow
-    /// us to correctly resolve overridden dependencies between patches
-    /// hopefully!
+    /// Lock all patch summaries added via [`patch`](Self::patch),
+    /// making them available to resolution via [`Registry::query`].
     pub fn lock_patches(&mut self) {
         assert!(!self.patches_locked);
         for summaries in self.patches.values_mut() {
@@ -442,7 +509,7 @@ impl<'cfg> PackageRegistry<'cfg> {
         self.patches_locked = true;
     }
 
-    /// Gets all patches grouped by the source URLS they are going to patch.
+    /// Gets all patches grouped by the source URLs they are going to patch.
     ///
     /// These patches are mainly collected from [`patch`](Self::patch).
     /// They might not be the same as patches actually used during dependency resolving.
@@ -450,6 +517,8 @@ impl<'cfg> PackageRegistry<'cfg> {
         &self.patches
     }
 
+    /// Loads the [`Source`] for a given [`SourceId`] to this registry, making
+    /// them available to resolution.
     fn load(&mut self, source_id: SourceId, kind: Kind) -> CargoResult<()> {
         debug!("loading source {}", source_id);
         let source = self
@@ -468,9 +537,9 @@ impl<'cfg> PackageRegistry<'cfg> {
         //
         // If we have a precise version, then we'll update lazily during the
         // querying phase. Note that precise in this case is only
-        // `Some("locked")` as other `Some` values indicate a `cargo update
+        // `"locked"` as other values indicate a `cargo update
         // --precise` request
-        if source_id.precise() != Some("locked") {
+        if !source_id.has_locked_precise() {
             self.sources.get_mut(source_id).unwrap().invalidate_cache();
         } else {
             debug!("skipping update due to locked registry");
@@ -478,13 +547,16 @@ impl<'cfg> PackageRegistry<'cfg> {
         Ok(())
     }
 
-    fn query_overrides(&mut self, dep: &Dependency) -> Poll<CargoResult<Option<Summary>>> {
+    /// Queries path overrides from this registry.
+    fn query_overrides(&mut self, dep: &Dependency) -> Poll<CargoResult<Option<IndexSummary>>> {
         for &s in self.overrides.iter() {
             let src = self.sources.get_mut(s).unwrap();
             let dep = Dependency::new_override(dep.package_name(), s);
-            let mut results = ready!(src.query_vec(&dep, QueryKind::Exact))?;
-            if !results.is_empty() {
-                return Poll::Ready(Ok(Some(results.remove(0))));
+
+            let mut results = None;
+            ready!(src.query(&dep, QueryKind::Exact, &mut |s| results = Some(s)))?;
+            if results.is_some() {
+                return Poll::Ready(Ok(results));
             }
         }
         Poll::Ready(Ok(None))
@@ -546,7 +618,7 @@ https://doc.rust-lang.org/cargo/reference/overriding-dependencies.html
                 dep.package_name(),
                 boilerplate
             );
-            self.source_config.config().shell().warn(&msg)?;
+            self.source_config.gctx().shell().warn(&msg)?;
             return Ok(());
         }
 
@@ -559,7 +631,7 @@ https://doc.rust-lang.org/cargo/reference/overriding-dependencies.html
                 dep.package_name(),
                 boilerplate
             );
-            self.source_config.config().shell().warn(&msg)?;
+            self.source_config.gctx().shell().warn(&msg)?;
             return Ok(());
         }
 
@@ -567,141 +639,136 @@ https://doc.rust-lang.org/cargo/reference/overriding-dependencies.html
     }
 }
 
-impl<'cfg> Registry for PackageRegistry<'cfg> {
+impl<'gctx> Registry for PackageRegistry<'gctx> {
     fn query(
         &mut self,
         dep: &Dependency,
         kind: QueryKind,
-        f: &mut dyn FnMut(Summary),
+        f: &mut dyn FnMut(IndexSummary),
     ) -> Poll<CargoResult<()>> {
         assert!(self.patches_locked);
-        let (override_summary, n, to_warn) = {
-            // Look for an override and get ready to query the real source.
-            let override_summary = ready!(self.query_overrides(dep))?;
+        // Look for an override and get ready to query the real source.
+        let override_summary = ready!(self.query_overrides(dep))?;
 
-            // Next up on our list of candidates is to check the `[patch]`
-            // section of the manifest. Here we look through all patches
-            // relevant to the source that `dep` points to, and then we match
-            // name/version. Note that we don't use `dep.matches(..)` because
-            // the patches, by definition, come from a different source.
-            // This means that `dep.matches(..)` will always return false, when
-            // what we really care about is the name/version match.
-            let mut patches = Vec::<Summary>::new();
-            if let Some(extra) = self.patches.get(dep.source_id().canonical_url()) {
-                patches.extend(
-                    extra
-                        .iter()
-                        .filter(|s| dep.matches_ignoring_source(s.package_id()))
-                        .cloned(),
-                );
-            }
-
-            // A crucial feature of the `[patch]` feature is that we *don't*
-            // query the actual registry if we have a "locked" dependency. A
-            // locked dep basically just means a version constraint of `=a.b.c`,
-            // and because patches take priority over the actual source then if
-            // we have a candidate we're done.
-            if patches.len() == 1 && dep.is_locked() {
-                let patch = patches.remove(0);
-                match override_summary {
-                    Some(summary) => (summary, 1, Some(patch)),
-                    None => {
-                        f(patch);
-                        return Poll::Ready(Ok(()));
-                    }
-                }
-            } else {
-                if !patches.is_empty() {
-                    debug!(
-                        "found {} patches with an unlocked dep on `{}` at {} \
-                         with `{}`, \
-                         looking at sources",
-                        patches.len(),
-                        dep.package_name(),
-                        dep.source_id(),
-                        dep.version_req()
-                    );
-                }
-
-                // Ensure the requested source_id is loaded
-                self.ensure_loaded(dep.source_id(), Kind::Normal)
-                    .with_context(|| {
-                        format!(
-                            "failed to load source for dependency `{}`",
-                            dep.package_name()
-                        )
-                    })?;
-
-                let source = self.sources.get_mut(dep.source_id());
-                match (override_summary, source) {
-                    (Some(_), None) => {
-                        return Poll::Ready(Err(anyhow::anyhow!("override found but no real ones")))
-                    }
-                    (None, None) => return Poll::Ready(Ok(())),
-
-                    // If we don't have an override then we just ship
-                    // everything upstairs after locking the summary
-                    (None, Some(source)) => {
-                        for patch in patches.iter() {
-                            f(patch.clone());
-                        }
-
-                        // Our sources shouldn't ever come back to us with two
-                        // summaries that have the same version. We could,
-                        // however, have an `[patch]` section which is in use
-                        // to override a version in the registry. This means
-                        // that if our `summary` in this loop has the same
-                        // version as something in `patches` that we've
-                        // already selected, then we skip this `summary`.
-                        let locked = &self.locked;
-                        let all_patches = &self.patches_available;
-                        let callback = &mut |summary: Summary| {
-                            for patch in patches.iter() {
-                                let patch = patch.package_id().version();
-                                if summary.package_id().version() == patch {
-                                    return;
-                                }
-                            }
-                            f(lock(locked, all_patches, summary))
-                        };
-                        return source.query(dep, kind, callback);
-                    }
-
-                    // If we have an override summary then we query the source
-                    // to sanity check its results. We don't actually use any of
-                    // the summaries it gives us though.
-                    (Some(override_summary), Some(source)) => {
-                        if !patches.is_empty() {
-                            return Poll::Ready(Err(anyhow::anyhow!(
-                                "found patches and a path override"
-                            )));
-                        }
-                        let mut n = 0;
-                        let mut to_warn = None;
-                        {
-                            let callback = &mut |summary| {
-                                n += 1;
-                                to_warn = Some(summary);
-                            };
-                            let pend = source.query(dep, kind, callback);
-                            if pend.is_pending() {
-                                return Poll::Pending;
-                            }
-                        }
-                        (override_summary, n, to_warn)
-                    }
-                }
-            }
-        };
-
-        if n > 1 {
-            return Poll::Ready(Err(anyhow::anyhow!(
-                "found an override with a non-locked list"
-            )));
-        } else if let Some(summary) = to_warn {
-            self.warn_bad_override(&override_summary, &summary)?;
+        // Next up on our list of candidates is to check the `[patch]` section
+        // of the manifest. Here we look through all patches relevant to the
+        // source that `dep` points to, and then we match name/version. Note
+        // that we don't use `dep.matches(..)` because the patches, by definition,
+        // come from a different source. This means that `dep.matches(..)` will
+        // always return false, when what we really care about is the name/version match.
+        let mut patches = Vec::<Summary>::new();
+        if let Some(extra) = self.patches.get(dep.source_id().canonical_url()) {
+            patches.extend(
+                extra
+                    .iter()
+                    .filter(|s| dep.matches_ignoring_source(s.package_id()))
+                    .cloned(),
+            );
         }
-        f(self.lock(override_summary));
+
+        // A crucial feature of the `[patch]` feature is that we don't query the
+        // actual registry if we have a "locked" dependency. A locked dep basically
+        // just means a version constraint of `=a.b.c`, and because patches take
+        // priority over the actual source then if we have a candidate we're done.
+        if patches.len() == 1 && dep.is_locked() {
+            let patch = patches.remove(0);
+            match override_summary {
+                Some(override_summary) => {
+                    self.warn_bad_override(override_summary.as_summary(), &patch)?;
+                    let override_summary =
+                        override_summary.map_summary(|summary| self.lock(summary));
+                    f(override_summary);
+                }
+                None => f(IndexSummary::Candidate(patch)),
+            }
+
+            return Poll::Ready(Ok(()));
+        }
+
+        if !patches.is_empty() {
+            debug!(
+                "found {} patches with an unlocked dep on `{}` at {} \
+                     with `{}`, \
+                     looking at sources",
+                patches.len(),
+                dep.package_name(),
+                dep.source_id(),
+                dep.version_req()
+            );
+        }
+
+        // Ensure the requested source_id is loaded
+        self.ensure_loaded(dep.source_id(), Kind::Normal)
+            .with_context(|| {
+                format!(
+                    "failed to load source for dependency `{}`",
+                    dep.package_name()
+                )
+            })?;
+
+        let source = self.sources.get_mut(dep.source_id());
+        match (override_summary, source) {
+            (Some(_), None) => {
+                return Poll::Ready(Err(anyhow::anyhow!("override found but no real ones")))
+            }
+            (None, None) => return Poll::Ready(Ok(())),
+
+            // If we don't have an override then we just ship everything upstairs after locking the summary
+            (None, Some(source)) => {
+                for patch in patches.iter() {
+                    f(IndexSummary::Candidate(patch.clone()));
+                }
+
+                // Our sources shouldn't ever come back to us with two summaries
+                // that have the same version. We could, however, have an `[patch]`
+                // section which is in use to override a version in the registry.
+                // This means that if our `summary` in this loop has the same
+                // version as something in `patches` that we've already selected,
+                // then we skip this `summary`.
+                let locked = &self.locked;
+                let all_patches = &self.patches_available;
+                let callback = &mut |summary: IndexSummary| {
+                    for patch in patches.iter() {
+                        let patch = patch.package_id().version();
+                        if summary.package_id().version() == patch {
+                            return;
+                        }
+                    }
+                    let summary = summary.map_summary(|summary| lock(locked, all_patches, summary));
+                    f(summary)
+                };
+                return source.query(dep, kind, callback);
+            }
+
+            // If we have an override summary then we query the source to sanity check its results.
+            // We don't actually use any of the summaries it gives us though.
+            (Some(override_summary), Some(source)) => {
+                if !patches.is_empty() {
+                    return Poll::Ready(Err(anyhow::anyhow!("found patches and a path override")));
+                }
+                let mut n = 0;
+                let mut to_warn = None;
+                let callback = &mut |summary| {
+                    n += 1;
+                    to_warn = Some(summary);
+                };
+                let pend = source.query(dep, kind, callback);
+                if pend.is_pending() {
+                    return Poll::Pending;
+                }
+                if n > 1 {
+                    return Poll::Ready(Err(anyhow::anyhow!(
+                        "found an override with a non-locked list"
+                    )));
+                }
+                if let Some(to_warn) = to_warn {
+                    self.warn_bad_override(override_summary.as_summary(), to_warn.as_summary())?;
+                }
+                let override_summary = override_summary.map_summary(|summary| self.lock(summary));
+                f(override_summary);
+            }
+        }
+
         Poll::Ready(Ok(()))
     }
 
@@ -719,7 +786,13 @@ impl<'cfg> Registry for PackageRegistry<'cfg> {
         }
     }
 
+    #[tracing::instrument(skip_all)]
     fn block_until_ready(&mut self) -> CargoResult<()> {
+        if cfg!(debug_assertions) {
+            // Force borrow to catch invalid borrows, regardless of which source is used and how it
+            // happens to behave this time
+            self.gctx.shell().verbosity();
+        }
         for (source_id, source) in self.sources.sources_mut() {
             source
                 .block_until_ready()
@@ -729,6 +802,7 @@ impl<'cfg> Registry for PackageRegistry<'cfg> {
     }
 }
 
+/// See [`PackageRegistry::lock`].
 fn lock(
     locked: &LockedMap,
     patches: &HashMap<CanonicalUrl, Vec<PackageId>>,
@@ -837,7 +911,12 @@ fn lock(
     })
 }
 
-/// This is a helper for selecting the summary, or generating a helpful error message.
+/// A helper for selecting the summary, or generating a helpful error message.
+///
+/// Returns a tuple that the first element is the summary selected. The second
+/// is a package ID indicating that the patch entry should be unlocked. This
+/// happens when a match cannot be found with the `locked` one, but found one
+/// via the original patch, so we need to inform the resolver to "unlock" it.
 fn summary_for_patch(
     orig_patch: &Dependency,
     locked: &Option<LockedPatchDependency>,
@@ -884,10 +963,9 @@ fn summary_for_patch(
                 Vec::new()
             });
 
-        let summary = ready!(summary_for_patch(orig_patch, &None, orig_matches, source))?;
+        let orig_matches = orig_matches.into_iter().map(|s| s.into_summary()).collect();
 
-        // The unlocked version found a match. This returns a value to
-        // indicate that this entry should be unlocked.
+        let summary = ready!(summary_for_patch(orig_patch, &None, orig_matches, source))?;
         return Poll::Ready(Ok((summary.0, Some(locked.package_id))));
     }
     // Try checking if there are *any* packages that match this by name.
@@ -904,7 +982,7 @@ fn summary_for_patch(
         });
     let mut vers = name_summaries
         .iter()
-        .map(|summary| summary.version())
+        .map(|summary| summary.as_summary().version())
         .collect::<Vec<_>>();
     let found = match vers.len() {
         0 => format!(""),

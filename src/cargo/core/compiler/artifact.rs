@@ -1,7 +1,7 @@
 //! Generate artifact information from unit dependencies for configuring the compiler environment.
 
 use crate::core::compiler::unit_graph::UnitDep;
-use crate::core::compiler::{Context, CrateType, FileFlavor, Unit};
+use crate::core::compiler::{BuildRunner, CrateType, FileFlavor, Unit};
 use crate::core::dependency::ArtifactKind;
 use crate::core::{Dependency, Target, TargetKind};
 use crate::CargoResult;
@@ -11,12 +11,12 @@ use std::ffi::OsString;
 /// Return all environment variables for the given unit-dependencies
 /// if artifacts are present.
 pub fn get_env(
-    cx: &Context<'_, '_>,
+    build_runner: &BuildRunner<'_, '_>,
     dependencies: &[UnitDep],
 ) -> CargoResult<HashMap<String, OsString>> {
     let mut env = HashMap::new();
     for unit_dep in dependencies.iter().filter(|d| d.unit.artifact.is_true()) {
-        for artifact_path in cx
+        for artifact_path in build_runner
             .outputs(&unit_dep.unit)?
             .iter()
             .filter_map(|f| (f.flavor == FileFlavor::Normal).then(|| &f.path))
@@ -29,15 +29,39 @@ pub fn get_env(
             let path = artifact_path.parent().expect("parent dir for artifacts");
             env.insert(var, path.to_owned().into());
 
-            let var = format!(
+            let var_file = format!(
                 "CARGO_{}_FILE_{}_{}",
                 artifact_type_upper,
                 dep_name_upper,
                 unit_dep.unit.target.name()
             );
-            env.insert(var, artifact_path.to_owned().into());
 
-            if unit_dep.unit.target.name() == dep_name.as_str() {
+            // In older releases, lib-targets defaulted to the name of the package. Newer releases
+            // use the same name as default, but with dashes replaced. Hence, if the name of the
+            // target was inferred by Cargo, we also set the env-var with the unconverted name for
+            // backwards compatibility.
+            let need_compat = unit_dep.unit.target.is_lib() && unit_dep.unit.target.name_inferred();
+            if need_compat {
+                let var_compat = format!(
+                    "CARGO_{}_FILE_{}_{}",
+                    artifact_type_upper,
+                    dep_name_upper,
+                    unit_dep.unit.pkg.name(),
+                );
+                if var_compat != var_file {
+                    env.insert(var_compat, artifact_path.to_owned().into());
+                }
+            }
+
+            env.insert(var_file, artifact_path.to_owned().into());
+
+            // If the name of the target matches the name of the dependency, we strip the
+            // repetition and provide the simpler env-var as well.
+            // For backwards-compatibility of inferred names, we compare against the name of the
+            // package as well, since that used to be the default for library targets.
+            if unit_dep.unit.target.name() == dep_name.as_str()
+                || (need_compat && unit_dep.unit.pkg.name() == dep_name.as_str())
+            {
                 let var = format!("CARGO_{}_FILE_{}", artifact_type_upper, dep_name_upper,);
                 env.insert(var, artifact_path.to_owned().into());
             }

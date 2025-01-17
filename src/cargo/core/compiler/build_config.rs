@@ -1,13 +1,13 @@
 use crate::core::compiler::CompileKind;
-use crate::util::config::JobsConfig;
+use crate::util::context::JobsConfig;
 use crate::util::interning::InternedString;
-use crate::util::{CargoResult, Config, RustfixDiagnosticServer};
+use crate::util::{CargoResult, GlobalContext, RustfixDiagnosticServer};
 use anyhow::{bail, Context as _};
 use cargo_util::ProcessBuilder;
 use serde::ser;
 use std::cell::RefCell;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::rc::Rc;
 use std::thread::available_parallelism;
 
 /// Configuration information for a rustc build.
@@ -31,16 +31,18 @@ pub struct BuildConfig {
     pub build_plan: bool,
     /// Output the unit graph to stdout instead of actually compiling.
     pub unit_graph: bool,
+    /// `true` to avoid really compiling.
+    pub dry_run: bool,
     /// An optional override of the rustc process for primary units
     pub primary_unit_rustc: Option<ProcessBuilder>,
     /// A thread used by `cargo fix` to receive messages on a socket regarding
     /// the success/failure of applying fixes.
-    pub rustfix_diagnostic_server: Arc<RefCell<Option<RustfixDiagnosticServer>>>,
-    /// The directory to copy final artifacts to. Note that even if `out_dir` is
-    /// set, a copy of artifacts still could be found a `target/(debug\release)`
-    /// as usual.
-    // Note that, although the cmd-line flag name is `out-dir`, in code we use
-    // `export_dir`, to avoid confusion with out dir at `target/debug/deps`.
+    pub rustfix_diagnostic_server: Rc<RefCell<Option<RustfixDiagnosticServer>>>,
+    /// The directory to copy final artifacts to. Note that even if
+    /// `artifact-dir` is set, a copy of artifacts still can be found at
+    /// `target/(debug\release)` as usual.
+    /// Named `export_dir` to avoid confusion with
+    /// `CompilationFiles::artifact_dir`.
     pub export_dir: Option<PathBuf>,
     /// `true` to output a future incompatibility report at the end of the build
     pub future_incompat_report: bool,
@@ -64,16 +66,16 @@ impl BuildConfig {
     /// * `target.$target.linker`
     /// * `target.$target.libfoo.metadata`
     pub fn new(
-        config: &Config,
+        gctx: &GlobalContext,
         jobs: Option<JobsConfig>,
         keep_going: bool,
         requested_targets: &[String],
         mode: CompileMode,
     ) -> CargoResult<BuildConfig> {
-        let cfg = config.build_config()?;
-        let requested_kinds = CompileKind::from_requested_targets(config, requested_targets)?;
-        if jobs.is_some() && config.jobserver_from_env().is_some() {
-            config.shell().warn(
+        let cfg = gctx.build_config()?;
+        let requested_kinds = CompileKind::from_requested_targets(gctx, requested_targets)?;
+        if jobs.is_some() && gctx.jobserver_from_env().is_some() {
+            gctx.shell().warn(
                 "a `-j` argument was passed to Cargo but Cargo is \
                  also configured with an external jobserver in \
                  its environment, ignoring the `-j` parameter",
@@ -97,11 +99,6 @@ impl BuildConfig {
             },
         };
 
-        if config.cli_unstable().build_std.is_some() && requested_kinds[0].is_host() {
-            // TODO: This should eventually be fixed.
-            anyhow::bail!("-Zbuild-std requires --target");
-        }
-
         Ok(BuildConfig {
             requested_kinds,
             jobs,
@@ -112,8 +109,9 @@ impl BuildConfig {
             force_rebuild: false,
             build_plan: false,
             unit_graph: false,
+            dry_run: false,
             primary_unit_rustc: None,
-            rustfix_diagnostic_server: Arc::new(RefCell::new(None)),
+            rustfix_diagnostic_server: Rc::new(RefCell::new(None)),
             export_dir: None,
             future_incompat_report: false,
             timing_outputs: Vec::new(),
@@ -156,6 +154,7 @@ pub enum MessageFormat {
 }
 
 /// The general "mode" for what to do.
+///
 /// This is used for two purposes. The commands themselves pass this in to
 /// `compile_ws` to tell it the general execution strategy. This influences
 /// the default targets selected. The other use is in the `Unit` struct
@@ -176,8 +175,10 @@ pub enum CompileMode {
     /// allows some de-duping of Units to occur.
     Bench,
     /// A target that will be documented with `rustdoc`.
+
     /// If `deps` is true, then it will also document all dependencies.
-    Doc { deps: bool },
+    /// if `json` is true, the documentation output is in json format.
+    Doc { deps: bool, json: bool },
     /// A target that will be tested with `rustdoc`.
     Doctest,
     /// An example or library that will be scraped for function calls by `rustdoc`.

@@ -1,4 +1,5 @@
-#![allow(clippy::all)]
+//! > This crate is maintained by the Cargo team for use by the wider
+//! > ecosystem. This crate follows semver compatibility for its APIs.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -38,6 +39,10 @@ pub struct Crate {
     pub max_version: String,
 }
 
+/// This struct is serialized as JSON and sent as metadata ahead of the crate
+/// tarball when publishing crates to a crate registry like crates.io.
+///
+/// see <https://doc.rust-lang.org/cargo/reference/registry-web-api.html#publish>
 #[derive(Serialize, Deserialize)]
 pub struct NewCrate {
     pub name: String,
@@ -142,7 +147,7 @@ pub enum Error {
     #[error(transparent)]
     Curl(#[from] curl::Error),
 
-    /// Error from seriailzing the request payload and deserialzing the
+    /// Error from seriailzing the request payload and deserializing the
     /// response body (like response body didn't match expected structure).
     #[error(transparent)]
     Json(#[from] serde_json::Error),
@@ -387,7 +392,9 @@ impl Registry {
         self.handle.url(&format!("{}/api/v1{}", self.host, path))?;
         let mut headers = List::new();
         headers.append("Accept: application/json")?;
-        headers.append("Content-Type: application/json")?;
+        if body.is_some() {
+            headers.append("Content-Type: application/json")?;
+        }
 
         if self.auth_required || authorized == Auth::Authorized {
             headers.append(&format!("Authorization: {}", self.token()?))?;
@@ -434,7 +441,8 @@ impl Registry {
             .map(|s| s.errors.into_iter().map(|s| s.detail).collect::<Vec<_>>());
 
         match (self.handle.response_code()?, errors) {
-            (0, None) | (200, None) => Ok(body),
+            (0, None) => Ok(body),
+            (code, None) if is_success(code) => Ok(body),
             (code, Some(errors)) => Err(Error::Api {
                 code,
                 headers,
@@ -449,8 +457,12 @@ impl Registry {
     }
 }
 
+fn is_success(code: u32) -> bool {
+    code >= 200 && code < 300
+}
+
 fn status(code: u32) -> String {
-    if code == 200 {
+    if is_success(code) {
         String::new()
     } else {
         let reason = reason(code);

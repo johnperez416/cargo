@@ -44,7 +44,7 @@ If no source is specified, then a best effort will be made to select one, includ
 .sp
 When you add a package that is already present, the existing entry will be updated with the flags specified.
 .sp
-Upon successful invocation, the enabled (\fB+\fR) and disabled (\fB\-\fR) \fIfeatures\fR <https://doc.rust\-lang.org/cargo/reference/features.md> of the specified
+Upon successful invocation, the enabled (\fB+\fR) and disabled (\fB\-\fR) \fIfeatures\fR <https://doc.rust\-lang.org/cargo/reference/features.html> of the specified
 dependency will be listed in the command\[cq]s output.
 .SH "OPTIONS"
 .SS "Source options"
@@ -72,6 +72,13 @@ Specific commit to use when adding from git.
 \fB\-\-path\fR \fIpath\fR
 .RS 4
 \fIFilesystem path\fR <https://doc.rust\-lang.org/cargo/reference/specifying\-dependencies.html#specifying\-path\-dependencies> to local crate to add.
+.RE
+.sp
+\fB\-\-base\fR \fIbase\fR
+.RS 4
+The \fIpath base\fR <https://doc.rust\-lang.org/cargo/reference/unstable.html#path\-bases> to use when adding a local crate.
+.sp
+\fIUnstable (nightly\-only)\fR <https://doc.rust\-lang.org/cargo/reference/unstable.html#path\-bases>
 .RE
 .sp
 \fB\-\-registry\fR \fIregistry\fR
@@ -121,6 +128,24 @@ Mark the dependency as \fIoptional\fR <https://doc.rust\-lang.org/cargo/referenc
 Mark the dependency as \fIrequired\fR <https://doc.rust\-lang.org/cargo/reference/features.html#optional\-dependencies>\&.
 .RE
 .sp
+\fB\-\-public\fR
+.RS 4
+Mark the dependency as public.
+.sp
+The dependency can be referenced in your library\[cq]s public API.
+.sp
+\fIUnstable (nightly\-only)\fR <https://doc.rust\-lang.org/cargo/reference/unstable.html#public\-dependency>
+.RE
+.sp
+\fB\-\-no\-public\fR
+.RS 4
+Mark the dependency as private.
+.sp
+While you can use the crate in your implementation, it cannot be referenced in your public API.
+.sp
+\fIUnstable (nightly\-only)\fR <https://doc.rust\-lang.org/cargo/reference/unstable.html#public\-dependency>
+.RE
+.sp
 \fB\-\-no\-default\-features\fR
 .RS 4
 Disable the \fIdefault features\fR <https://doc.rust\-lang.org/cargo/reference/features.html#dependency\-features>\&.
@@ -139,16 +164,6 @@ activate\fR <https://doc.rust\-lang.org/cargo/reference/features.html#dependency
 crates, the features for a specific crate may be enabled with
 \fBpackage\-name/feature\-name\fR syntax. This flag may be specified multiple times,
 which enables all specified features.
-.RE
-.sp
-\fB\-\-ignore\-rust\-version\fR
-.RS 4
-Ignore \fBrust\-version\fR specification in packages.
-.sp
-This option is unstable and available only on the
-\fInightly channel\fR <https://doc.rust\-lang.org/book/appendix\-07\-nightly\-rust.html>
-and requires the \fB\-Z unstable\-options\fR flag to enable.
-See <https://github.com/rust\-lang/cargo/issues/5579> for more information.
 .RE
 .SS "Display Options"
 .sp
@@ -203,17 +218,27 @@ Path to the \fBCargo.toml\fR file. By default, Cargo searches for the
 Add dependencies to only the specified package.
 .RE
 .sp
-\fB\-\-frozen\fR, 
+\fB\-\-ignore\-rust\-version\fR
+.RS 4
+Ignore \fBrust\-version\fR specification in packages.
+.RE
+.sp
 \fB\-\-locked\fR
 .RS 4
-Either of these flags requires that the \fBCargo.lock\fR file is
-up\-to\-date. If the lock file is missing, or it needs to be updated, Cargo will
-exit with an error. The \fB\-\-frozen\fR flag also prevents Cargo from
-attempting to access the network to determine if it is out\-of\-date.
+Asserts that the exact same dependencies and versions are used as when the
+existing \fBCargo.lock\fR file was originally generated. Cargo will exit with an
+error when either of the following scenarios arises:
 .sp
-These may be used in environments where you want to assert that the
-\fBCargo.lock\fR file is up\-to\-date (such as a CI build) or want to avoid network
-access.
+.RS 4
+\h'-04'\(bu\h'+02'The lock file is missing.
+.RE
+.sp
+.RS 4
+\h'-04'\(bu\h'+02'Cargo attempted to change the lock file due to a different dependency resolution.
+.RE
+.sp
+It may be used in environments where deterministic builds are desired,
+such as in CI pipelines.
 .RE
 .sp
 \fB\-\-offline\fR
@@ -230,6 +255,25 @@ See the \fBcargo\-fetch\fR(1) command to download dependencies before going
 offline.
 .sp
 May also be specified with the \fBnet.offline\fR \fIconfig value\fR <https://doc.rust\-lang.org/cargo/reference/config.html>\&.
+.RE
+.sp
+\fB\-\-frozen\fR
+.RS 4
+Equivalent to specifying both \fB\-\-locked\fR and \fB\-\-offline\fR\&.
+.RE
+.sp
+\fB\-\-lockfile\-path\fR \fIPATH\fR
+.RS 4
+Changes the path of the lockfile from the default (\fB<workspace_root>/Cargo.lock\fR) to \fIPATH\fR\&. \fIPATH\fR must end with
+\fBCargo.lock\fR (e.g. \fB\-\-lockfile\-path /tmp/temporary\-lockfile/Cargo.lock\fR). Note that providing
+\fB\-\-lockfile\-path\fR will ignore existing lockfile at the default path, and instead will
+either use the lockfile from \fIPATH\fR, or write a new lockfile into the provided \fIPATH\fR if it doesn\[cq]t exist.
+This flag can be used to run most commands in read\-only directories, writing lockfile into the provided \fIPATH\fR\&.
+.sp
+This option is only available on the \fInightly
+channel\fR <https://doc.rust\-lang.org/book/appendix\-07\-nightly\-rust.html> and
+requires the \fB\-Z unstable\-options\fR flag to enable (see
+\fI#14421\fR <https://github.com/rust\-lang/cargo/issues/14421>).
 .RE
 .SS "Common Options"
 .sp

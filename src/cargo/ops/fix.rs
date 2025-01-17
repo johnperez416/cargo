@@ -35,31 +35,34 @@
 //!   applied cleanly, rustc is run again to verify the suggestions didn't
 //!   break anything. The change will be backed out if it fails (unless
 //!   `--broken-code` is used).
-//! - If there are any warnings or errors, rustc will be run one last time to
-//!   show them to the user.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ffi::OsString;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{self, ExitStatus};
+use std::process::{self, ExitStatus, Output};
 use std::{env, fs, str};
 
 use anyhow::{bail, Context as _};
 use cargo_util::{exit_status_to_string, is_simple_exit_code, paths, ProcessBuilder};
+use cargo_util_schemas::manifest::TomlManifest;
 use rustfix::diagnostics::Diagnostic;
-use rustfix::{self, CodeFix};
+use rustfix::CodeFix;
 use semver::Version;
 use tracing::{debug, trace, warn};
 
+use crate::core::compiler::CompileKind;
 use crate::core::compiler::RustcTargetData;
 use crate::core::resolver::features::{DiffMap, FeatureOpts, FeatureResolver, FeaturesFor};
 use crate::core::resolver::{HasDevUnits, Resolve, ResolveBehavior};
-use crate::core::{Edition, MaybePackage, PackageId, Workspace};
+use crate::core::PackageIdSpecQuery as _;
+use crate::core::{Edition, MaybePackage, Package, PackageId, Workspace};
 use crate::ops::resolve::WorkspaceResolve;
 use crate::ops::{self, CompileOptions};
 use crate::util::diagnostic_server::{Message, RustfixDiagnosticServer};
 use crate::util::errors::CargoResult;
-use crate::util::Config;
+use crate::util::toml_mut::manifest::LocalManifest;
+use crate::util::GlobalContext;
 use crate::util::{existing_vcs_repo, LockServer, LockServerClient};
 use crate::{drop_eprint, drop_eprintln};
 
@@ -77,6 +80,14 @@ const EDITION_ENV_INTERNAL: &str = "__CARGO_FIX_EDITION";
 /// **Internal only.**
 /// For passing [`FixOptions::idioms`] through to cargo running in proxy mode.
 const IDIOMS_ENV_INTERNAL: &str = "__CARGO_FIX_IDIOMS";
+/// **Internal only.**
+/// The sysroot path.
+///
+/// This is for preventing `cargo fix` from fixing rust std/core libs. See
+///
+/// * <https://github.com/rust-lang/cargo/issues/9857>
+/// * <https://github.com/rust-lang/rust/issues/88514#issuecomment-2043469384>
+const SYSROOT_INTERNAL: &str = "__CARGO_FIX_RUST_SRC";
 
 pub struct FixOptions {
     pub edition: bool,
@@ -86,13 +97,32 @@ pub struct FixOptions {
     pub allow_no_vcs: bool,
     pub allow_staged: bool,
     pub broken_code: bool,
+    pub requested_lockfile_path: Option<PathBuf>,
 }
 
-pub fn fix(ws: &Workspace<'_>, opts: &mut FixOptions) -> CargoResult<()> {
-    check_version_control(ws.config(), opts)?;
+pub fn fix(
+    gctx: &GlobalContext,
+    original_ws: &Workspace<'_>,
+    root_manifest: &Path,
+    opts: &mut FixOptions,
+) -> CargoResult<()> {
+    check_version_control(gctx, opts)?;
+
+    let mut target_data =
+        RustcTargetData::new(original_ws, &opts.compile_opts.build_config.requested_kinds)?;
     if opts.edition {
-        check_resolver_change(ws, opts)?;
+        let specs = opts.compile_opts.spec.to_package_id_specs(&original_ws)?;
+        let members: Vec<&Package> = original_ws
+            .members()
+            .filter(|m| specs.iter().any(|spec| spec.matches(m.package_id())))
+            .collect();
+        migrate_manifests(original_ws, &members)?;
+
+        check_resolver_change(&original_ws, &mut target_data, opts)?;
     }
+    let mut ws = Workspace::new(&root_manifest, gctx)?;
+    ws.set_resolve_honors_rust_version(Some(original_ws.resolve_honors_rust_version()));
+    ws.set_requested_lockfile_path(opts.requested_lockfile_path.clone());
 
     // Spin up our lock server, which our subprocesses will use to synchronize fixes.
     let lock_server = LockServer::new()?;
@@ -113,6 +143,11 @@ pub fn fix(ws: &Workspace<'_>, opts: &mut FixOptions) -> CargoResult<()> {
         wrapper.env(IDIOMS_ENV_INTERNAL, "1");
     }
 
+    let sysroot = &target_data.info(CompileKind::Host).sysroot;
+    if sysroot.is_dir() {
+        wrapper.env(SYSROOT_INTERNAL, sysroot);
+    }
+
     *opts
         .compile_opts
         .build_config
@@ -129,7 +164,7 @@ pub fn fix(ws: &Workspace<'_>, opts: &mut FixOptions) -> CargoResult<()> {
         server.configure(&mut wrapper);
     }
 
-    let rustc = ws.config().load_global_rustc(Some(ws))?;
+    let rustc = ws.gctx().load_global_rustc(Some(&ws))?;
     wrapper.arg(&rustc.path);
     // This is calling rustc in cargo fix-proxy-mode, so it also need to retry.
     // The argfile handling are located at `FixArgs::from_args`.
@@ -139,15 +174,15 @@ pub fn fix(ws: &Workspace<'_>, opts: &mut FixOptions) -> CargoResult<()> {
     // repeating build until there are no more changes to be applied
     opts.compile_opts.build_config.primary_unit_rustc = Some(wrapper);
 
-    ops::compile(ws, &opts.compile_opts)?;
+    ops::compile(&ws, &opts.compile_opts)?;
     Ok(())
 }
 
-fn check_version_control(config: &Config, opts: &FixOptions) -> CargoResult<()> {
+fn check_version_control(gctx: &GlobalContext, opts: &FixOptions) -> CargoResult<()> {
     if opts.allow_no_vcs {
         return Ok(());
     }
-    if !existing_vcs_repo(config.cwd(), config.cwd()) {
+    if !existing_vcs_repo(gctx.cwd(), gctx.cwd()) {
         bail!(
             "no VCS found for this package and `cargo fix` can potentially \
              perform destructive changes; if you'd like to suppress this \
@@ -161,7 +196,7 @@ fn check_version_control(config: &Config, opts: &FixOptions) -> CargoResult<()> 
 
     let mut dirty_files = Vec::new();
     let mut staged_files = Vec::new();
-    if let Ok(repo) = git2::Repository::discover(config.cwd()) {
+    if let Ok(repo) = git2::Repository::discover(gctx.cwd()) {
         let mut repo_opts = git2::StatusOptions::new();
         repo_opts.include_ignored(false);
         repo_opts.include_untracked(true);
@@ -216,7 +251,248 @@ fn check_version_control(config: &Config, opts: &FixOptions) -> CargoResult<()> 
     );
 }
 
-fn check_resolver_change(ws: &Workspace<'_>, opts: &FixOptions) -> CargoResult<()> {
+fn migrate_manifests(ws: &Workspace<'_>, pkgs: &[&Package]) -> CargoResult<()> {
+    // HACK: Duplicate workspace migration logic between virtual manifests and real manifests to
+    // reduce multiple Migrating messages being reported for the same file to the user
+    if matches!(ws.root_maybe(), MaybePackage::Virtual(_)) {
+        // Warning: workspaces do not have an edition so this should only include changes needed by
+        // packages that preserve the behavior of the workspace on all editions
+        let highest_edition = pkgs
+            .iter()
+            .map(|p| p.manifest().edition())
+            .max()
+            .unwrap_or_default();
+        let prepare_for_edition = highest_edition.saturating_next();
+        if highest_edition == prepare_for_edition
+            || (!prepare_for_edition.is_stable() && !ws.gctx().nightly_features_allowed)
+        {
+            //
+        } else {
+            let mut manifest_mut = LocalManifest::try_new(ws.root_manifest())?;
+            let document = &mut manifest_mut.data;
+            let mut fixes = 0;
+
+            if Edition::Edition2024 <= prepare_for_edition {
+                let root = document.as_table_mut();
+
+                if let Some(workspace) = root
+                    .get_mut("workspace")
+                    .and_then(|t| t.as_table_like_mut())
+                {
+                    // strictly speaking, the edition doesn't apply to this table but it should be safe
+                    // enough
+                    fixes += rename_dep_fields_2024(workspace, "dependencies");
+                }
+            }
+
+            if 0 < fixes {
+                // HACK: As workspace migration is a special case, only report it if something
+                // happened
+                let file = ws.root_manifest();
+                let file = file.strip_prefix(ws.root()).unwrap_or(file);
+                let file = file.display();
+                ws.gctx().shell().status(
+                    "Migrating",
+                    format!("{file} from {highest_edition} edition to {prepare_for_edition}"),
+                )?;
+
+                let verb = if fixes == 1 { "fix" } else { "fixes" };
+                let msg = format!("{file} ({fixes} {verb})");
+                ws.gctx().shell().status("Fixed", msg)?;
+
+                manifest_mut.write()?;
+            }
+        }
+    }
+
+    for pkg in pkgs {
+        let existing_edition = pkg.manifest().edition();
+        let prepare_for_edition = existing_edition.saturating_next();
+        if existing_edition == prepare_for_edition
+            || (!prepare_for_edition.is_stable() && !ws.gctx().nightly_features_allowed)
+        {
+            continue;
+        }
+        let file = pkg.manifest_path();
+        let file = file.strip_prefix(ws.root()).unwrap_or(file);
+        let file = file.display();
+        ws.gctx().shell().status(
+            "Migrating",
+            format!("{file} from {existing_edition} edition to {prepare_for_edition}"),
+        )?;
+
+        let mut manifest_mut = LocalManifest::try_new(pkg.manifest_path())?;
+        let document = &mut manifest_mut.data;
+        let mut fixes = 0;
+
+        let ws_original_toml = match ws.root_maybe() {
+            MaybePackage::Package(package) => package.manifest().original_toml(),
+            MaybePackage::Virtual(manifest) => manifest.original_toml(),
+        };
+        if Edition::Edition2024 <= prepare_for_edition {
+            let root = document.as_table_mut();
+
+            if let Some(workspace) = root
+                .get_mut("workspace")
+                .and_then(|t| t.as_table_like_mut())
+            {
+                // strictly speaking, the edition doesn't apply to this table but it should be safe
+                // enough
+                fixes += rename_dep_fields_2024(workspace, "dependencies");
+            }
+
+            fixes += rename_table(root, "project", "package");
+            if let Some(target) = root.get_mut("lib").and_then(|t| t.as_table_like_mut()) {
+                fixes += rename_target_fields_2024(target);
+            }
+            fixes += rename_array_of_target_fields_2024(root, "bin");
+            fixes += rename_array_of_target_fields_2024(root, "example");
+            fixes += rename_array_of_target_fields_2024(root, "test");
+            fixes += rename_array_of_target_fields_2024(root, "bench");
+            fixes += rename_dep_fields_2024(root, "dependencies");
+            fixes += remove_ignored_default_features_2024(root, "dependencies", ws_original_toml);
+            fixes += rename_table(root, "dev_dependencies", "dev-dependencies");
+            fixes += rename_dep_fields_2024(root, "dev-dependencies");
+            fixes +=
+                remove_ignored_default_features_2024(root, "dev-dependencies", ws_original_toml);
+            fixes += rename_table(root, "build_dependencies", "build-dependencies");
+            fixes += rename_dep_fields_2024(root, "build-dependencies");
+            fixes +=
+                remove_ignored_default_features_2024(root, "build-dependencies", ws_original_toml);
+            for target in root
+                .get_mut("target")
+                .and_then(|t| t.as_table_like_mut())
+                .iter_mut()
+                .flat_map(|t| t.iter_mut())
+                .filter_map(|(_k, t)| t.as_table_like_mut())
+            {
+                fixes += rename_dep_fields_2024(target, "dependencies");
+                fixes +=
+                    remove_ignored_default_features_2024(target, "dependencies", ws_original_toml);
+                fixes += rename_table(target, "dev_dependencies", "dev-dependencies");
+                fixes += rename_dep_fields_2024(target, "dev-dependencies");
+                fixes += remove_ignored_default_features_2024(
+                    target,
+                    "dev-dependencies",
+                    ws_original_toml,
+                );
+                fixes += rename_table(target, "build_dependencies", "build-dependencies");
+                fixes += rename_dep_fields_2024(target, "build-dependencies");
+                fixes += remove_ignored_default_features_2024(
+                    target,
+                    "build-dependencies",
+                    ws_original_toml,
+                );
+            }
+        }
+
+        if 0 < fixes {
+            let verb = if fixes == 1 { "fix" } else { "fixes" };
+            let msg = format!("{file} ({fixes} {verb})");
+            ws.gctx().shell().status("Fixed", msg)?;
+
+            manifest_mut.write()?;
+        }
+    }
+
+    Ok(())
+}
+
+fn rename_dep_fields_2024(parent: &mut dyn toml_edit::TableLike, dep_kind: &str) -> usize {
+    let mut fixes = 0;
+    for target in parent
+        .get_mut(dep_kind)
+        .and_then(|t| t.as_table_like_mut())
+        .iter_mut()
+        .flat_map(|t| t.iter_mut())
+        .filter_map(|(_k, t)| t.as_table_like_mut())
+    {
+        fixes += rename_table(target, "default_features", "default-features");
+    }
+    fixes
+}
+
+fn remove_ignored_default_features_2024(
+    parent: &mut dyn toml_edit::TableLike,
+    dep_kind: &str,
+    ws_original_toml: &TomlManifest,
+) -> usize {
+    let mut fixes = 0;
+    for (name_in_toml, target) in parent
+        .get_mut(dep_kind)
+        .and_then(|t| t.as_table_like_mut())
+        .iter_mut()
+        .flat_map(|t| t.iter_mut())
+        .filter_map(|(k, t)| t.as_table_like_mut().map(|t| (k, t)))
+    {
+        let name_in_toml: &str = &name_in_toml;
+        let ws_deps = ws_original_toml
+            .workspace
+            .as_ref()
+            .and_then(|ws| ws.dependencies.as_ref());
+        if let Some(ws_dep) = ws_deps.and_then(|ws_deps| ws_deps.get(name_in_toml)) {
+            if ws_dep.default_features() == Some(false) {
+                continue;
+            }
+        }
+        if target
+            .get("workspace")
+            .and_then(|i| i.as_value())
+            .and_then(|i| i.as_bool())
+            == Some(true)
+            && target
+                .get("default-features")
+                .and_then(|i| i.as_value())
+                .and_then(|i| i.as_bool())
+                == Some(false)
+        {
+            target.remove("default-features");
+            fixes += 1;
+        }
+    }
+    fixes
+}
+
+fn rename_array_of_target_fields_2024(root: &mut dyn toml_edit::TableLike, kind: &str) -> usize {
+    let mut fixes = 0;
+    for target in root
+        .get_mut(kind)
+        .and_then(|t| t.as_array_of_tables_mut())
+        .iter_mut()
+        .flat_map(|t| t.iter_mut())
+    {
+        fixes += rename_target_fields_2024(target);
+    }
+    fixes
+}
+
+fn rename_target_fields_2024(target: &mut dyn toml_edit::TableLike) -> usize {
+    let mut fixes = 0;
+    fixes += rename_table(target, "crate_type", "crate-type");
+    fixes += rename_table(target, "proc_macro", "proc-macro");
+    fixes
+}
+
+fn rename_table(parent: &mut dyn toml_edit::TableLike, old: &str, new: &str) -> usize {
+    let Some(old_key) = parent.key(old).cloned() else {
+        return 0;
+    };
+
+    let project = parent.remove(old).expect("returned early");
+    if !parent.contains_key(new) {
+        parent.insert(new, project);
+        let mut new_key = parent.key_mut(new).expect("just inserted");
+        *new_key.dotted_decor_mut() = old_key.dotted_decor().clone();
+        *new_key.leaf_decor_mut() = old_key.leaf_decor().clone();
+    }
+    1
+}
+
+fn check_resolver_change<'gctx>(
+    ws: &Workspace<'gctx>,
+    target_data: &mut RustcTargetData<'gctx>,
+    opts: &FixOptions,
+) -> CargoResult<()> {
     let root = ws.root_maybe();
     match root {
         MaybePackage::Package(root_pkg) => {
@@ -243,26 +519,23 @@ fn check_resolver_change(ws: &Workspace<'_>, opts: &FixOptions) -> CargoResult<(
     // 2018 without `resolver` set must be V1
     assert_eq!(ws.resolve_behavior(), ResolveBehavior::V1);
     let specs = opts.compile_opts.spec.to_package_id_specs(ws)?;
-    let mut target_data =
-        RustcTargetData::new(ws, &opts.compile_opts.build_config.requested_kinds)?;
     let mut resolve_differences = |has_dev_units| -> CargoResult<(WorkspaceResolve<'_>, DiffMap)> {
-        let max_rust_version = ws.rust_version();
-
+        let dry_run = false;
         let ws_resolve = ops::resolve_ws_with_opts(
             ws,
-            &mut target_data,
+            target_data,
             &opts.compile_opts.build_config.requested_kinds,
             &opts.compile_opts.cli_features,
             &specs,
             has_dev_units,
             crate::core::resolver::features::ForceAllTargets::No,
-            max_rust_version,
+            dry_run,
         )?;
 
         let feature_opts = FeatureOpts::new_behavior(ResolveBehavior::V2, has_dev_units);
         let v2_features = FeatureResolver::resolve(
             ws,
-            &mut target_data,
+            target_data,
             &ws_resolve.targeted_resolve,
             &ws_resolve.pkg_set,
             &opts.compile_opts.cli_features,
@@ -282,51 +555,51 @@ fn check_resolver_change(ws: &Workspace<'_>, opts: &FixOptions) -> CargoResult<(
     }
     // Only display unique changes with dev-dependencies.
     with_dev_diffs.retain(|k, vals| without_dev_diffs.get(k) != Some(vals));
-    let config = ws.config();
-    config.shell().note(
+    let gctx = ws.gctx();
+    gctx.shell().note(
         "Switching to Edition 2021 will enable the use of the version 2 feature resolver in Cargo.",
     )?;
     drop_eprintln!(
-        config,
+        gctx,
         "This may cause some dependencies to be built with fewer features enabled than previously."
     );
     drop_eprintln!(
-        config,
+        gctx,
         "More information about the resolver changes may be found \
          at https://doc.rust-lang.org/nightly/edition-guide/rust-2021/default-cargo-resolver.html"
     );
     drop_eprintln!(
-        config,
+        gctx,
         "When building the following dependencies, \
          the given features will no longer be used:\n"
     );
     let show_diffs = |differences: DiffMap| {
         for ((pkg_id, features_for), removed) in differences {
-            drop_eprint!(config, "  {}", pkg_id);
+            drop_eprint!(gctx, "  {}", pkg_id);
             if let FeaturesFor::HostDep = features_for {
-                drop_eprint!(config, " (as host dependency)");
+                drop_eprint!(gctx, " (as host dependency)");
             }
-            drop_eprint!(config, " removed features: ");
+            drop_eprint!(gctx, " removed features: ");
             let joined: Vec<_> = removed.iter().map(|s| s.as_str()).collect();
-            drop_eprintln!(config, "{}", joined.join(", "));
+            drop_eprintln!(gctx, "{}", joined.join(", "));
         }
-        drop_eprint!(config, "\n");
+        drop_eprint!(gctx, "\n");
     };
     if !without_dev_diffs.is_empty() {
         show_diffs(without_dev_diffs);
     }
     if !with_dev_diffs.is_empty() {
         drop_eprintln!(
-            config,
+            gctx,
             "The following differences only apply when building with dev-dependencies:\n"
         );
         show_diffs(with_dev_diffs);
     }
-    report_maybe_diesel(config, &ws_resolve.targeted_resolve)?;
+    report_maybe_diesel(gctx, &ws_resolve.targeted_resolve)?;
     Ok(())
 }
 
-fn report_maybe_diesel(config: &Config, resolve: &Resolve) -> CargoResult<()> {
+fn report_maybe_diesel(gctx: &GlobalContext, resolve: &Resolve) -> CargoResult<()> {
     fn is_broken_diesel(pid: PackageId) -> bool {
         pid.name() == "diesel" && pid.version() < &Version::new(1, 4, 8)
     }
@@ -336,7 +609,7 @@ fn report_maybe_diesel(config: &Config, resolve: &Resolve) -> CargoResult<()> {
     }
 
     if resolve.iter().any(is_broken_diesel) && resolve.iter().any(is_broken_diesel_migration) {
-        config.shell().note(
+        gctx.shell().note(
             "\
 This project appears to use both diesel and diesel_migrations. These packages have
 a known issue where the build may fail due to the version 2 resolver preventing
@@ -367,11 +640,11 @@ pub fn fix_get_proxy_lock_addr() -> Option<String> {
 /// and the process exits with the corresponding `rustc` exit code.
 ///
 /// See [`fix_get_proxy_lock_addr`]
-pub fn fix_exec_rustc(config: &Config, lock_addr: &str) -> CargoResult<()> {
+pub fn fix_exec_rustc(gctx: &GlobalContext, lock_addr: &str) -> CargoResult<()> {
     let args = FixArgs::get()?;
     trace!("cargo-fix as rustc got file {:?}", args.file);
 
-    let workspace_rustc = config
+    let workspace_rustc = gctx
         .get_env("RUSTC_WORKSPACE_WRAPPER")
         .map(PathBuf::from)
         .ok();
@@ -379,87 +652,103 @@ pub fn fix_exec_rustc(config: &Config, lock_addr: &str) -> CargoResult<()> {
     rustc.retry_with_argfile(true);
     rustc.env_remove(FIX_ENV_INTERNAL);
     args.apply(&mut rustc);
+    // Removes `FD_CLOEXEC` set by `jobserver::Client` to ensure that the
+    // compiler can access the jobserver.
+    if let Some(client) = gctx.jobserver_from_env() {
+        rustc.inherit_jobserver(client);
+    }
 
     trace!("start rustfixing {:?}", args.file);
-    let json_error_rustc = {
-        let mut cmd = rustc.clone();
-        cmd.arg("--error-format=json");
-        cmd
-    };
-    let fixes = rustfix_crate(&lock_addr, &json_error_rustc, &args.file, &args, config)?;
+    let fixes = rustfix_crate(&lock_addr, &rustc, &args.file, &args, gctx)?;
 
-    // Ok now we have our final goal of testing out the changes that we applied.
-    // If these changes went awry and actually started to cause the crate to
-    // *stop* compiling then we want to back them out and continue to print
-    // warnings to the user.
+    if fixes.last_output.status.success() {
+        for (path, file) in fixes.files.iter() {
+            Message::Fixed {
+                file: path.clone(),
+                fixes: file.fixes_applied,
+            }
+            .post(gctx)?;
+        }
+        // Display any remaining diagnostics.
+        emit_output(&fixes.last_output)?;
+        return Ok(());
+    }
+
+    let allow_broken_code = gctx.get_env_os(BROKEN_CODE_ENV_INTERNAL).is_some();
+
+    // There was an error running rustc during the last run.
     //
-    // If we didn't actually make any changes then we can immediately execute the
-    // new rustc, and otherwise we capture the output to hide it in the scenario
-    // that we have to back it all out.
-    if !fixes.files.is_empty() {
-        debug!("calling rustc for final verification: {json_error_rustc}");
-        let output = json_error_rustc.output()?;
-
-        if output.status.success() {
-            for (path, file) in fixes.files.iter() {
-                Message::Fixed {
-                    file: path.clone(),
-                    fixes: file.fixes_applied,
-                }
-                .post(config)?;
-            }
-        }
-
-        // If we succeeded then we'll want to commit to the changes we made, if
-        // any. If stderr is empty then there's no need for the final exec at
-        // the end, we just bail out here.
-        if output.status.success() && output.stderr.is_empty() {
-            return Ok(());
-        }
-
-        // Otherwise, if our rustc just failed, then that means that we broke the
-        // user's code with our changes. Back out everything and fall through
-        // below to recompile again.
-        if !output.status.success() {
-            if config.get_env_os(BROKEN_CODE_ENV_INTERNAL).is_none() {
-                for (path, file) in fixes.files.iter() {
-                    debug!("reverting {:?} due to errors", path);
-                    paths::write(path, &file.original_code)?;
-                }
-            }
-
-            let krate = {
-                let mut iter = json_error_rustc.get_args();
-                let mut krate = None;
-                while let Some(arg) = iter.next() {
-                    if arg == "--crate-name" {
-                        krate = iter.next().and_then(|s| s.to_owned().into_string().ok());
-                    }
-                }
-                krate
-            };
-            log_failed_fix(config, krate, &output.stderr, output.status)?;
+    // Back out all of the changes unless --broken-code was used.
+    if !allow_broken_code {
+        for (path, file) in fixes.files.iter() {
+            debug!("reverting {:?} due to errors", path);
+            paths::write(path, &file.original_code)?;
         }
     }
 
-    // This final fall-through handles multiple cases;
-    // - If the fix failed, show the original warnings and suggestions.
-    // - If `--broken-code`, show the error messages.
-    // - If the fix succeeded, show any remaining warnings.
-    for arg in args.format_args {
-        // Add any json/error format arguments that Cargo wants. This allows
-        // things like colored output to work correctly.
-        rustc.arg(arg);
+    // If there were any fixes, let the user know that there was a failure
+    // attempting to apply them, and to ask for a bug report.
+    //
+    // FIXME: The error message here is not correct with --broken-code.
+    //        https://github.com/rust-lang/cargo/issues/10955
+    if fixes.files.is_empty() {
+        // No fixes were available. Display whatever errors happened.
+        emit_output(&fixes.last_output)?;
+        exit_with(fixes.last_output.status);
+    } else {
+        let krate = {
+            let mut iter = rustc.get_args();
+            let mut krate = None;
+            while let Some(arg) = iter.next() {
+                if arg == "--crate-name" {
+                    krate = iter.next().and_then(|s| s.to_owned().into_string().ok());
+                }
+            }
+            krate
+        };
+        log_failed_fix(
+            gctx,
+            krate,
+            &fixes.last_output.stderr,
+            fixes.last_output.status,
+        )?;
+        // Display the diagnostics that appeared at the start, before the
+        // fixes failed. This can help with diagnosing which suggestions
+        // caused the failure.
+        emit_output(&fixes.first_output)?;
+        // Exit with whatever exit code we initially started with. `cargo fix`
+        // treats this as a warning, and shouldn't return a failure code
+        // unless the code didn't compile in the first place.
+        exit_with(fixes.first_output.status);
     }
-    debug!("calling rustc to display remaining diagnostics: {rustc}");
-    exit_with(rustc.status()?);
 }
 
-#[derive(Default)]
+fn emit_output(output: &Output) -> CargoResult<()> {
+    // Unfortunately if there is output on stdout, this does not preserve the
+    // order of output relative to stderr. In practice, rustc should never
+    // print to stdout unless some proc-macro does it.
+    std::io::stderr().write_all(&output.stderr)?;
+    std::io::stdout().write_all(&output.stdout)?;
+    Ok(())
+}
+
 struct FixedCrate {
+    /// Map of file path to some information about modifications made to that file.
     files: HashMap<String, FixedFile>,
+    /// The output from rustc from the first time it was called.
+    ///
+    /// This is needed when fixes fail to apply, so that it can display the
+    /// original diagnostics to the user which can help with diagnosing which
+    /// suggestions caused the failure.
+    first_output: Output,
+    /// The output from rustc from the last time it was called.
+    ///
+    /// This will be displayed to the user to show any remaining diagnostics
+    /// or errors.
+    last_output: Output,
 }
 
+#[derive(Debug)]
 struct FixedFile {
     errors_applying_fixes: Vec<String>,
     fixes_applied: u32,
@@ -475,13 +764,8 @@ fn rustfix_crate(
     rustc: &ProcessBuilder,
     filename: &Path,
     args: &FixArgs,
-    config: &Config,
+    gctx: &GlobalContext,
 ) -> CargoResult<FixedCrate> {
-    if !args.can_run_rustfix(config)? {
-        // This fix should not be run. Skipping...
-        return Ok(FixedCrate::default());
-    }
-
     // First up, we want to make sure that each crate is only checked by one
     // process at a time. If two invocations concurrently check a crate then
     // it's likely to corrupt it.
@@ -492,6 +776,23 @@ fn rustfix_crate(
     // makes it slower, but is the only safe way to prevent concurrent
     // modification.
     let _lock = LockServerClient::lock(&lock_addr.parse()?, "global")?;
+
+    // Map of files that have been modified.
+    let mut files = HashMap::new();
+
+    if !args.can_run_rustfix(gctx)? {
+        // This fix should not be run. Skipping...
+        // We still need to run rustc at least once to make sure any potential
+        // rmeta gets generated, and diagnostics get displayed.
+        debug!("can't fix {filename:?}, running rustc: {rustc}");
+        let last_output = rustc.output()?;
+        let fixes = FixedCrate {
+            files,
+            first_output: last_output.clone(),
+            last_output,
+        };
+        return Ok(fixes);
+    }
 
     // Next up, this is a bit suspicious, but we *iteratively* execute rustc and
     // collect suggestions to feed to rustfix. Once we hit our limit of times to
@@ -526,51 +827,68 @@ fn rustfix_crate(
     //   Detect this when a fix fails to get applied *and* no suggestions
     //   successfully applied to the same file. In that case looks like we
     //   definitely can't make progress, so bail out.
-    let mut fixes = FixedCrate::default();
-    let mut last_fix_counts = HashMap::new();
-    let iterations = config
+    let max_iterations = gctx
         .get_env("CARGO_FIX_MAX_RETRIES")
         .ok()
         .and_then(|n| n.parse().ok())
         .unwrap_or(4);
-    for _ in 0..iterations {
-        last_fix_counts.clear();
-        for (path, file) in fixes.files.iter_mut() {
-            last_fix_counts.insert(path.clone(), file.fixes_applied);
+    let mut last_output;
+    let mut last_made_changes;
+    let mut first_output = None;
+    let mut current_iteration = 0;
+    loop {
+        for file in files.values_mut() {
             // We'll generate new errors below.
             file.errors_applying_fixes.clear();
         }
-        rustfix_and_fix(&mut fixes, rustc, filename, config)?;
+        (last_output, last_made_changes) =
+            rustfix_and_fix(&mut files, rustc, filename, args, gctx)?;
+        if current_iteration == 0 {
+            first_output = Some(last_output.clone());
+        }
         let mut progress_yet_to_be_made = false;
-        for (path, file) in fixes.files.iter_mut() {
+        for (path, file) in files.iter_mut() {
             if file.errors_applying_fixes.is_empty() {
                 continue;
             }
+            debug!("had rustfix apply errors in {path:?} {file:?}");
             // If anything was successfully fixed *and* there's at least one
             // error, then assume the error was spurious and we'll try again on
             // the next iteration.
-            if file.fixes_applied != *last_fix_counts.get(path).unwrap_or(&0) {
+            if last_made_changes {
                 progress_yet_to_be_made = true;
             }
         }
         if !progress_yet_to_be_made {
             break;
         }
+        current_iteration += 1;
+        if current_iteration >= max_iterations {
+            break;
+        }
+    }
+    if last_made_changes {
+        debug!("calling rustc one last time for final results: {rustc}");
+        last_output = rustc.output()?;
     }
 
     // Any errors still remaining at this point need to be reported as probably
     // bugs in Cargo and/or rustfix.
-    for (path, file) in fixes.files.iter_mut() {
+    for (path, file) in files.iter_mut() {
         for error in file.errors_applying_fixes.drain(..) {
             Message::ReplaceFailed {
                 file: path.clone(),
                 message: error,
             }
-            .post(config)?;
+            .post(gctx)?;
         }
     }
 
-    Ok(fixes)
+    Ok(FixedCrate {
+        files,
+        first_output: first_output.expect("at least one iteration"),
+        last_output,
+    })
 }
 
 /// Executes `rustc` to apply one round of suggestions to the crate in question.
@@ -578,11 +896,12 @@ fn rustfix_crate(
 /// This will fill in the `fixes` map with original code, suggestions applied,
 /// and any errors encountered while fixing files.
 fn rustfix_and_fix(
-    fixes: &mut FixedCrate,
+    files: &mut HashMap<String, FixedFile>,
     rustc: &ProcessBuilder,
     filename: &Path,
-    config: &Config,
-) -> CargoResult<()> {
+    args: &FixArgs,
+    gctx: &GlobalContext,
+) -> CargoResult<(Output, bool)> {
     // If not empty, filter by these lints.
     // TODO: implement a way to specify this.
     let only = HashSet::new();
@@ -595,16 +914,16 @@ fn rustfix_and_fix(
     // worse by applying fixes where a bug could cause *more* broken code.
     // Instead, punt upwards which will reexec rustc over the original code,
     // displaying pretty versions of the diagnostics we just read out.
-    if !output.status.success() && config.get_env_os(BROKEN_CODE_ENV_INTERNAL).is_none() {
+    if !output.status.success() && gctx.get_env_os(BROKEN_CODE_ENV_INTERNAL).is_none() {
         debug!(
             "rustfixing `{:?}` failed, rustc exited with {:?}",
             filename,
             output.status.code()
         );
-        return Ok(());
+        return Ok((output, false));
     }
 
-    let fix_mode = config
+    let fix_mode = gctx
         .get_env_os("__CARGO_FIX_YOLO")
         .map(|_| rustfix::Filter::Everything)
         .unwrap_or(rustfix::Filter::MachineApplicableOnly);
@@ -626,7 +945,7 @@ fn rustfix_and_fix(
     let mut file_map = HashMap::new();
     let mut num_suggestion = 0;
     // It's safe since we won't read any content under home dir.
-    let home_path = config.home().as_path_unlocked();
+    let home_path = gctx.home().as_path_unlocked();
     for suggestion in suggestions {
         trace!("suggestion");
         // Make sure we've got a file associated with this suggestion and all
@@ -645,9 +964,16 @@ fn rustfix_and_fix(
             continue;
         };
 
+        let file_path = Path::new(&file_name);
         // Do not write into registry cache. See rust-lang/cargo#9857.
-        if Path::new(&file_name).starts_with(home_path) {
+        if file_path.starts_with(home_path) {
             continue;
+        }
+        // Do not write into standard library source. See rust-lang/cargo#9857.
+        if let Some(sysroot) = args.sysroot.as_deref() {
+            if file_path.starts_with(sysroot) {
+                continue;
+            }
         }
 
         if !file_names.clone().all(|f| f == &file_name) {
@@ -669,6 +995,7 @@ fn rustfix_and_fix(
         filename.display(),
     );
 
+    let mut made_changes = false;
     for (file, suggestions) in file_map {
         // Attempt to read the source code for this file. If this fails then
         // that'd be pretty surprising, so log a message and otherwise keep
@@ -687,36 +1014,42 @@ fn rustfix_and_fix(
         // code, so save it. If the file already exists then the original code
         // doesn't need to be updated as we've just read an interim state with
         // some fixes but perhaps not all.
-        let fixed_file = fixes
-            .files
-            .entry(file.clone())
-            .or_insert_with(|| FixedFile {
-                errors_applying_fixes: Vec::new(),
-                fixes_applied: 0,
-                original_code: code.clone(),
-            });
+        let fixed_file = files.entry(file.clone()).or_insert_with(|| FixedFile {
+            errors_applying_fixes: Vec::new(),
+            fixes_applied: 0,
+            original_code: code.clone(),
+        });
         let mut fixed = CodeFix::new(&code);
 
-        // As mentioned above in `rustfix_crate`, we don't immediately warn
-        // about suggestions that fail to apply here, and instead we save them
-        // off for later processing.
         for suggestion in suggestions.iter().rev() {
+            // As mentioned above in `rustfix_crate`,
+            // we don't immediately warn about suggestions that fail to apply here,
+            // and instead we save them off for later processing.
+            //
+            // However, we don't bother reporting conflicts that exactly match prior replacements.
+            // This is currently done to reduce noise for things like rust-lang/rust#51211,
+            // although it may be removed if that's fixed deeper in the compiler.
             match fixed.apply(suggestion) {
                 Ok(()) => fixed_file.fixes_applied += 1,
+                Err(rustfix::Error::AlreadyReplaced {
+                    is_identical: true, ..
+                }) => continue,
                 Err(e) => fixed_file.errors_applying_fixes.push(e.to_string()),
             }
         }
-        let new_code = fixed.finish()?;
-        paths::write(&file, new_code)?;
+        if fixed.modified() {
+            made_changes = true;
+            let new_code = fixed.finish()?;
+            paths::write(&file, new_code)?;
+        }
     }
 
-    Ok(())
+    Ok((output, made_changes))
 }
 
 fn exit_with(status: ExitStatus) -> ! {
     #[cfg(unix)]
     {
-        use std::io::Write;
         use std::os::unix::prelude::*;
         if let Some(signal) = status.signal() {
             drop(writeln!(
@@ -731,7 +1064,7 @@ fn exit_with(status: ExitStatus) -> ! {
 }
 
 fn log_failed_fix(
-    config: &Config,
+    gctx: &GlobalContext,
     krate: Option<String>,
     stderr: &[u8],
     status: ExitStatus,
@@ -770,7 +1103,7 @@ fn log_failed_fix(
         errors,
         abnormal_exit,
     }
-    .post(config)?;
+    .post(gctx)?;
 
     Ok(())
 }
@@ -794,12 +1127,8 @@ struct FixArgs {
     other: Vec<OsString>,
     /// Path to the `rustc` executable.
     rustc: PathBuf,
-    /// Console output flags (`--error-format`, `--json`, etc.).
-    ///
-    /// The normal fix procedure always uses `--json`, so it overrides what
-    /// Cargo normally passes when applying fixes. When displaying warnings or
-    /// errors, it will use these flags.
-    format_args: Vec<String>,
+    /// Path to host sysroot.
+    sysroot: Option<PathBuf>,
 }
 
 impl FixArgs {
@@ -817,7 +1146,6 @@ impl FixArgs {
         let mut file = None;
         let mut enabled_edition = None;
         let mut other = Vec::new();
-        let mut format_args = Vec::new();
 
         let mut handle_arg = |arg: OsString| -> CargoResult<()> {
             let path = PathBuf::from(arg);
@@ -828,12 +1156,6 @@ impl FixArgs {
             if let Some(s) = path.to_str() {
                 if let Some(edition) = s.strip_prefix("--edition=") {
                     enabled_edition = Some(edition.parse()?);
-                    return Ok(());
-                }
-                if s.starts_with("--error-format=") || s.starts_with("--json=") {
-                    // Cargo may add error-format in some cases, but `cargo
-                    // fix` wants to add its own.
-                    format_args.push(s.to_string());
                     return Ok(());
                 }
             }
@@ -878,6 +1200,11 @@ impl FixArgs {
                 .saturating_next()
         });
 
+        // ALLOWED: For the internal mechanism of `cargo fix` only.
+        // Shouldn't be set directly by anyone.
+        #[allow(clippy::disallowed_methods)]
+        let sysroot = env::var_os(SYSROOT_INTERNAL).map(PathBuf::from);
+
         Ok(FixArgs {
             file,
             prepare_for_edition,
@@ -885,7 +1212,7 @@ impl FixArgs {
             enabled_edition,
             other,
             rustc,
-            format_args,
+            sysroot,
         })
     }
 
@@ -919,16 +1246,13 @@ impl FixArgs {
 
     /// Validates the edition, and sends a message indicating what is being
     /// done. Returns a flag indicating whether this fix should be run.
-    fn can_run_rustfix(&self, config: &Config) -> CargoResult<bool> {
-        let to_edition = match self.prepare_for_edition {
-            Some(s) => s,
-            None => {
-                return Message::Fixing {
-                    file: self.file.display().to_string(),
-                }
-                .post(config)
-                .and(Ok(true));
+    fn can_run_rustfix(&self, gctx: &GlobalContext) -> CargoResult<bool> {
+        let Some(to_edition) = self.prepare_for_edition else {
+            return Message::Fixing {
+                file: self.file.display().to_string(),
             }
+            .post(gctx)
+            .and(Ok(true));
         };
         // Unfortunately determining which cargo targets are being built
         // isn't easy, and each target can be a different edition. The
@@ -940,7 +1264,7 @@ impl FixArgs {
         // Unfortunately this results in a pretty poor error message when
         // multiple jobs run in parallel (the error appears multiple
         // times). Hopefully this doesn't happen often in practice.
-        if !to_edition.is_stable() && !config.nightly_features_allowed {
+        if !to_edition.is_stable() && !gctx.nightly_features_allowed {
             let message = format!(
                 "`{file}` is on the latest edition, but trying to \
                  migrate to edition {to_edition}.\n\
@@ -953,7 +1277,7 @@ impl FixArgs {
                 message,
                 edition: to_edition.previous().unwrap(),
             }
-            .post(config)
+            .post(gctx)
             .and(Ok(false)); // Do not run rustfix for this the edition.
         }
         let from_edition = self.enabled_edition.unwrap_or(Edition::Edition2015);
@@ -968,14 +1292,14 @@ impl FixArgs {
                 message,
                 edition: to_edition,
             }
-            .post(config)
+            .post(gctx)
         } else {
             Message::Migrating {
                 file: self.file.display().to_string(),
                 from_edition,
                 to_edition,
             }
-            .post(config)
+            .post(gctx)
         }
         .and(Ok(true))
     }

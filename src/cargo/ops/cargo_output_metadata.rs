@@ -3,7 +3,7 @@ use crate::core::compiler::{CompileKind, RustcTargetData};
 use crate::core::dependency::DepKind;
 use crate::core::package::SerializedPackage;
 use crate::core::resolver::{features::CliFeatures, HasDevUnits, Resolve};
-use crate::core::{Package, PackageId, Workspace};
+use crate::core::{Package, PackageId, PackageIdSpec, Workspace};
 use crate::ops::{self, Packages};
 use crate::util::interning::InternedString;
 use crate::util::CargoResult;
@@ -33,7 +33,10 @@ pub fn output_metadata(ws: &Workspace<'_>, opt: &OutputMetadataOptions) -> Cargo
         );
     }
     let (packages, resolve) = if opt.no_deps {
-        let packages = ws.members().map(|pkg| pkg.serialized()).collect();
+        let packages = ws
+            .members()
+            .map(|pkg| pkg.serialized(ws.gctx().cli_unstable(), ws.unstable_features()))
+            .collect();
         (packages, None)
     } else {
         let (packages, resolve) = build_resolve_graph(ws, opt)?;
@@ -42,8 +45,11 @@ pub fn output_metadata(ws: &Workspace<'_>, opt: &OutputMetadataOptions) -> Cargo
 
     Ok(ExportInfo {
         packages,
-        workspace_members: ws.members().map(|pkg| pkg.package_id()).collect(),
-        workspace_default_members: ws.default_members().map(|pkg| pkg.package_id()).collect(),
+        workspace_members: ws.members().map(|pkg| pkg.package_id().to_spec()).collect(),
+        workspace_default_members: ws
+            .default_members()
+            .map(|pkg| pkg.package_id().to_spec())
+            .collect(),
         resolve,
         target_directory: ws.target_dir().into_path_unlocked(),
         version: VERSION,
@@ -58,8 +64,8 @@ pub fn output_metadata(ws: &Workspace<'_>, opt: &OutputMetadataOptions) -> Cargo
 #[derive(Serialize)]
 pub struct ExportInfo {
     packages: Vec<SerializedPackage>,
-    workspace_members: Vec<PackageId>,
-    workspace_default_members: Vec<PackageId>,
+    workspace_members: Vec<PackageIdSpec>,
+    workspace_default_members: Vec<PackageIdSpec>,
     resolve: Option<MetadataResolve>,
     target_directory: PathBuf,
     version: u32,
@@ -70,13 +76,13 @@ pub struct ExportInfo {
 #[derive(Serialize)]
 struct MetadataResolve {
     nodes: Vec<MetadataResolveNode>,
-    root: Option<PackageId>,
+    root: Option<PackageIdSpec>,
 }
 
 #[derive(Serialize)]
 struct MetadataResolveNode {
-    id: PackageId,
-    dependencies: Vec<PackageId>,
+    id: PackageIdSpec,
+    dependencies: Vec<PackageIdSpec>,
     deps: Vec<Dep>,
     features: Vec<InternedString>,
 }
@@ -86,7 +92,9 @@ struct Dep {
     // TODO(bindeps): after -Zbindeps gets stabilized,
     // mark this field as deprecated in the help manual of cargo-metadata
     name: InternedString,
-    pkg: PackageId,
+    pkg: PackageIdSpec,
+    #[serde(skip)]
+    pkg_id: PackageId,
     dep_kinds: Vec<DepKindInfo>,
 }
 
@@ -125,7 +133,7 @@ fn build_resolve_graph(
     // TODO: Without --filter-platform, features are being resolved for `host` only.
     // How should this work?
     let requested_kinds =
-        CompileKind::from_requested_targets(ws.config(), &metadata_opts.filter_platforms)?;
+        CompileKind::from_requested_targets(ws.gctx(), &metadata_opts.filter_platforms)?;
     let mut target_data = RustcTargetData::new(ws, &requested_kinds)?;
     // Resolve entire workspace.
     let specs = Packages::All.to_package_id_specs(ws)?;
@@ -135,10 +143,9 @@ fn build_resolve_graph(
         crate::core::resolver::features::ForceAllTargets::No
     };
 
-    let max_rust_version = ws.rust_version();
-
     // Note that even with --filter-platform we end up downloading host dependencies as well,
     // as that is the behavior of download_accessible.
+    let dry_run = false;
     let ws_resolve = ops::resolve_ws_with_opts(
         ws,
         &mut target_data,
@@ -147,7 +154,7 @@ fn build_resolve_graph(
         &specs,
         HasDevUnits::Yes,
         force_all,
-        max_rust_version,
+        dry_run,
     )?;
 
     let package_map: BTreeMap<PackageId, Package> = ws_resolve
@@ -174,12 +181,12 @@ fn build_resolve_graph(
     let actual_packages = package_map
         .into_iter()
         .filter_map(|(pkg_id, pkg)| node_map.get(&pkg_id).map(|_| pkg))
-        .map(|pkg| pkg.serialized())
+        .map(|pkg| pkg.serialized(ws.gctx().cli_unstable(), ws.unstable_features()))
         .collect();
 
     let mr = MetadataResolve {
         nodes: node_map.into_iter().map(|(_pkg_id, node)| node).collect(),
-        root: ws.current_opt().map(|pkg| pkg.package_id()),
+        root: ws.current_opt().map(|pkg| pkg.package_id().to_spec()),
     };
     Ok((actual_packages, mr))
 }
@@ -301,22 +308,24 @@ fn build_resolve_graph_r(
 
             dep_kinds.sort();
 
-            let pkg = normalize_id(dep_id);
+            let pkg_id = normalize_id(dep_id);
 
             let dep = match (lib_target, dep_kinds.len()) {
                 (Some(target), _) => Dep {
                     name: extern_name(target)?,
-                    pkg,
+                    pkg: pkg_id.to_spec(),
+                    pkg_id,
                     dep_kinds,
                 },
                 // No lib target exists but contains artifact deps.
                 (None, 1..) => Dep {
                     name: InternedString::new(""),
-                    pkg,
+                    pkg: pkg_id.to_spec(),
+                    pkg_id,
                     dep_kinds,
                 },
                 // No lib or artifact dep exists.
-                // Ususally this mean parent depending on non-lib bin crate.
+                // Usually this mean parent depending on non-lib bin crate.
                 (None, _) => continue,
             };
 
@@ -325,11 +334,10 @@ fn build_resolve_graph_r(
         dep_metadatas
     };
 
-    let dumb_deps: Vec<PackageId> = deps.iter().map(|dep| dep.pkg).collect();
-    let to_visit = dumb_deps.clone();
+    let to_visit: Vec<PackageId> = deps.iter().map(|dep| dep.pkg_id).collect();
     let node = MetadataResolveNode {
-        id: normalize_id(pkg_id),
-        dependencies: dumb_deps,
+        id: normalize_id(pkg_id).to_spec(),
+        dependencies: to_visit.iter().map(|id| id.to_spec()).collect(),
         deps,
         features,
     };

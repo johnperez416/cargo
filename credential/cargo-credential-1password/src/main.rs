@@ -1,4 +1,12 @@
 //! Cargo registry 1password credential process.
+//!
+//! > This crate is maintained by the Cargo team as a part of an experiment around
+//! > 1password integration. We encourage people to try to use this crate in their projects and
+//! > provide feedback through [issues](https://github.com/rust-lang/cargo/issues/), but do not
+//! > guarantee long term maintenance.
+
+#![allow(clippy::disallowed_methods)]
+#![allow(clippy::print_stderr)]
 
 use cargo_credential::{
     Action, CacheControl, Credential, CredentialResponse, Error, RegistryInfo, Secret,
@@ -79,6 +87,10 @@ impl OnePasswordKeychain {
         }
         let mut cmd = Command::new("op");
         cmd.args(["signin", "--raw"]);
+        if let Some(account) = &self.account {
+            cmd.arg("--account");
+            cmd.arg(account);
+        }
         cmd.stdout(Stdio::piped());
         let mut child = cmd
             .spawn()
@@ -255,8 +267,8 @@ pub struct OnePasswordCredential {}
 impl Credential for OnePasswordCredential {
     fn perform(
         &self,
-        registry: &RegistryInfo,
-        action: &Action,
+        registry: &RegistryInfo<'_>,
+        action: &Action<'_>,
         args: &[&str],
     ) -> Result<CredentialResponse, Error> {
         let op = OnePasswordKeychain::new(args)?;

@@ -1,3 +1,7 @@
+//! > This crate is maintained by the Cargo team, primarily for use by Cargo
+//! > and not intended for external use (except as a transitive dependency). This
+//! > crate may make major changes to its APIs or be deprecated without warning.
+
 #[cfg(target_os = "linux")]
 mod linux {
     //! Implementation of the libsecret credential helper.
@@ -104,18 +108,18 @@ mod linux {
     impl Credential for LibSecretCredential {
         fn perform(
             &self,
-            registry: &RegistryInfo,
-            action: &Action,
+            registry: &RegistryInfo<'_>,
+            action: &Action<'_>,
             _args: &[&str],
         ) -> Result<CredentialResponse, Error> {
             // Dynamically load libsecret to avoid users needing to install
             // additional -dev packages when building this provider.
             let lib;
-            let secret_password_lookup_sync: Symbol<SecretPasswordLookupSync>;
-            let secret_password_store_sync: Symbol<SecretPasswordStoreSync>;
-            let secret_password_clear_sync: Symbol<SecretPasswordClearSync>;
+            let secret_password_lookup_sync: Symbol<'_, SecretPasswordLookupSync>;
+            let secret_password_store_sync: Symbol<'_, SecretPasswordStoreSync>;
+            let secret_password_clear_sync: Symbol<'_, SecretPasswordClearSync>;
             unsafe {
-                lib = Library::new("libsecret-1.so").context(
+                lib = Library::new("libsecret-1.so.0").context(
                     "failed to load libsecret: try installing the `libsecret` \
                     or `libsecret-1-0` package with the system package manager",
                 )?;

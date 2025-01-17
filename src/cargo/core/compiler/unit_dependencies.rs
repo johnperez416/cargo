@@ -24,25 +24,25 @@ use crate::core::compiler::unit_graph::{UnitDep, UnitGraph};
 use crate::core::compiler::{
     CompileKind, CompileMode, CrateType, RustcTargetData, Unit, UnitInterner,
 };
-use crate::core::dependency::{Artifact, ArtifactTarget, DepKind};
+use crate::core::dependency::{Artifact, ArtifactKind, ArtifactTarget, DepKind};
 use crate::core::profiles::{Profile, Profiles, UnitFor};
 use crate::core::resolver::features::{FeaturesFor, ResolvedFeatures};
 use crate::core::resolver::Resolve;
 use crate::core::{Dependency, Package, PackageId, PackageSet, Target, TargetKind, Workspace};
 use crate::ops::resolve_all_features;
 use crate::util::interning::InternedString;
-use crate::util::Config;
+use crate::util::GlobalContext;
 use crate::CargoResult;
 
 const IS_NO_ARTIFACT_DEP: Option<&'static Artifact> = None;
 
 /// Collection of stuff used while creating the [`UnitGraph`].
-struct State<'a, 'cfg> {
-    ws: &'a Workspace<'cfg>,
-    config: &'cfg Config,
+struct State<'a, 'gctx> {
+    ws: &'a Workspace<'gctx>,
+    gctx: &'gctx GlobalContext,
     /// Stores the result of building the [`UnitGraph`].
     unit_dependencies: UnitGraph,
-    package_set: &'a PackageSet<'cfg>,
+    package_set: &'a PackageSet<'gctx>,
     usr_resolve: &'a Resolve,
     usr_features: &'a ResolvedFeatures,
     /// Like `usr_resolve` but for building standard library (`-Zbuild-std`).
@@ -53,7 +53,7 @@ struct State<'a, 'cfg> {
     is_std: bool,
     /// The mode we are compiling in. Used for preventing from building lib thrice.
     global_mode: CompileMode,
-    target_data: &'a RustcTargetData<'cfg>,
+    target_data: &'a RustcTargetData<'gctx>,
     profiles: &'a Profiles,
     interner: &'a UnitInterner,
     // Units for `-Zrustdoc-scrape-examples`.
@@ -81,9 +81,10 @@ impl IsArtifact {
 /// Then entry point for building a dependency graph of compilation units.
 ///
 /// You can find some information for arguments from doc of [`State`].
-pub fn build_unit_dependencies<'a, 'cfg>(
-    ws: &'a Workspace<'cfg>,
-    package_set: &'a PackageSet<'cfg>,
+#[tracing::instrument(skip_all)]
+pub fn build_unit_dependencies<'a, 'gctx>(
+    ws: &'a Workspace<'gctx>,
+    package_set: &'a PackageSet<'gctx>,
     resolve: &'a Resolve,
     features: &'a ResolvedFeatures,
     std_resolve: Option<&'a (Resolve, ResolvedFeatures)>,
@@ -91,7 +92,7 @@ pub fn build_unit_dependencies<'a, 'cfg>(
     scrape_units: &[Unit],
     std_roots: &HashMap<CompileKind, Vec<Unit>>,
     global_mode: CompileMode,
-    target_data: &'a RustcTargetData<'cfg>,
+    target_data: &'a RustcTargetData<'gctx>,
     profiles: &'a Profiles,
     interner: &'a UnitInterner,
 ) -> CargoResult<UnitGraph> {
@@ -107,7 +108,7 @@ pub fn build_unit_dependencies<'a, 'cfg>(
     };
     let mut state = State {
         ws,
-        config: ws.config(),
+        gctx: ws.gctx(),
         unit_dependencies: HashMap::new(),
         package_set,
         usr_resolve: resolve,
@@ -198,7 +199,7 @@ fn attach_std_deps(
 }
 
 /// Compute all the dependencies of the given root units.
-/// The result is stored in state.unit_dependencies.
+/// The result is stored in `state.unit_dependencies`.
 fn deps_of_roots(roots: &[Unit], state: &mut State<'_, '_>) -> CargoResult<()> {
     for unit in roots.iter() {
         // Dependencies of tests/benches should not have `panic` set.
@@ -212,9 +213,9 @@ fn deps_of_roots(roots: &[Unit], state: &mut State<'_, '_>) -> CargoResult<()> {
             if unit.target.proc_macro() {
                 // Special-case for proc-macros, which are forced to for-host
                 // since they need to link with the proc_macro crate.
-                UnitFor::new_host_test(state.config, root_compile_kind)
+                UnitFor::new_host_test(state.gctx, root_compile_kind)
             } else {
-                UnitFor::new_test(state.config, root_compile_kind)
+                UnitFor::new_test(state.gctx, root_compile_kind)
             }
         } else if unit.target.is_custom_build() {
             // This normally doesn't happen, except `clean` aggressively
@@ -273,17 +274,16 @@ fn compute_deps(
     let mut ret = Vec::new();
     let mut dev_deps = Vec::new();
     for (dep_pkg_id, deps) in state.deps(unit, unit_for) {
-        let dep_lib = match calc_artifact_deps(unit, unit_for, dep_pkg_id, &deps, state, &mut ret)?
-        {
-            Some(lib) => lib,
-            None => continue,
+        let Some(dep_lib) = calc_artifact_deps(unit, unit_for, dep_pkg_id, &deps, state, &mut ret)?
+        else {
+            continue;
         };
         let dep_pkg = state.get(dep_pkg_id);
         let mode = check_or_build_mode(unit.mode, dep_lib);
         let dep_unit_for = unit_for.with_dependency(unit, dep_lib, unit_for.root_compile_kind());
 
         let start = ret.len();
-        if state.config.cli_unstable().dual_proc_macros
+        if state.gctx.cli_unstable().dual_proc_macros
             && dep_lib.proc_macro()
             && !unit.kind.is_host()
         {
@@ -412,12 +412,9 @@ fn calc_artifact_deps<'a>(
     let mut maybe_non_artifact_lib = false;
     let artifact_pkg = state.get(dep_id);
     for dep in deps {
-        let artifact = match dep.artifact() {
-            Some(a) => a,
-            None => {
-                maybe_non_artifact_lib = true;
-                continue;
-            }
+        let Some(artifact) = dep.artifact() else {
+            maybe_non_artifact_lib = true;
+            continue;
         };
         has_artifact_lib |= artifact.is_lib();
         // Custom build scripts (build/compile) never get artifact dependencies,
@@ -460,11 +457,7 @@ fn compute_deps_custom_build(
     state: &State<'_, '_>,
 ) -> CargoResult<Vec<UnitDep>> {
     if let Some(links) = unit.pkg.manifest().links() {
-        if state
-            .target_data
-            .script_override(links, unit.kind)
-            .is_some()
-        {
+        if unit.links_overrides.get(links).is_some() {
             // Overridden build scripts don't have any dependencies.
             return Ok(Vec::new());
         }
@@ -558,17 +551,20 @@ fn artifact_targets_to_unit_deps(
     let ret =
         match_artifacts_kind_with_targets(dep, artifact_pkg.targets(), parent.pkg.name().as_str())?
             .into_iter()
-            .map(|(_artifact_kind, target)| target)
-            .flat_map(|target| {
+            .flat_map(|(artifact_kind, target)| {
                 // We split target libraries into individual units, even though rustc is able
-                // to produce multiple kinds in an single invocation for the sole reason that
+                // to produce multiple kinds in a single invocation for the sole reason that
                 // each artifact kind has its own output directory, something we can't easily
                 // teach rustc for now.
                 match target.kind() {
                     TargetKind::Lib(kinds) => Box::new(
                         kinds
                             .iter()
-                            .filter(|tk| matches!(tk, CrateType::Cdylib | CrateType::Staticlib))
+                            .filter(move |tk| match (tk, artifact_kind) {
+                                (CrateType::Cdylib, ArtifactKind::Cdylib) => true,
+                                (CrateType::Staticlib, ArtifactKind::Staticlib) => true,
+                                _ => false,
+                            })
                             .map(|target_kind| {
                                 new_unit_dep(
                                     state,
@@ -611,9 +607,8 @@ fn compute_deps_doc(
     // the documentation of the library being built.
     let mut ret = Vec::new();
     for (id, deps) in state.deps(unit, unit_for) {
-        let dep_lib = match calc_artifact_deps(unit, unit_for, id, &deps, state, &mut ret)? {
-            Some(lib) => lib,
-            None => continue,
+        let Some(dep_lib) = calc_artifact_deps(unit, unit_for, id, &deps, state, &mut ret)? else {
+            continue;
         };
         let dep_pkg = state.get(id);
         // Rustdoc only needs rmeta files for regular dependencies.
@@ -632,7 +627,7 @@ fn compute_deps_doc(
         )?;
         ret.push(lib_unit_dep);
         if dep_lib.documented() {
-            if let CompileMode::Doc { deps: true } = unit.mode {
+            if let CompileMode::Doc { deps: true, .. } = unit.mode {
                 // Document this lib as well.
                 let doc_unit_dep = new_unit_dep(
                     state,
@@ -860,6 +855,13 @@ fn new_unit_dep_with_profile(
         kind,
         mode,
         features,
+        state.target_data.info(kind).rustflags.clone(),
+        state.target_data.info(kind).rustdocflags.clone(),
+        state
+            .target_data
+            .target_config(kind)
+            .links_overrides
+            .clone(),
         state.is_std,
         /*dep_hash*/ 0,
         artifact.map_or(IsArtifact::No, |_| IsArtifact::Yes),
@@ -923,9 +925,8 @@ fn connect_run_custom_build_deps(state: &mut State<'_, '_>) {
         {
             // This list of dependencies all depend on `unit`, an execution of
             // the build script.
-            let reverse_deps = match reverse_deps_map.get(unit) {
-                Some(set) => set,
-                None => continue,
+            let Some(reverse_deps) = reverse_deps_map.get(unit) else {
+                continue;
             };
 
             let to_add = reverse_deps
@@ -990,7 +991,7 @@ fn connect_run_custom_build_deps(state: &mut State<'_, '_>) {
     }
 }
 
-impl<'a, 'cfg> State<'a, 'cfg> {
+impl<'a, 'gctx> State<'a, 'gctx> {
     /// Gets `std_resolve` during building std, otherwise `usr_resolve`.
     fn resolve(&self) -> &'a Resolve {
         if self.is_std {

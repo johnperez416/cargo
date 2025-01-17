@@ -1,10 +1,9 @@
 [package]
 name = "mdman"
 version = "0.0.0"
-rust-version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Creates a man page page from markdown."
+description = "Creates a man page from markdown."
 publish = false
 
 [dependencies]
@@ -16,4 +15,7 @@ serde_json.workspace = true
 url.workspace = true
 
 [dev-dependencies]
-pretty_assertions.workspace = true
+snapbox.workspace = true
+
+[lints]
+workspace = true

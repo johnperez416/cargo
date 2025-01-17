@@ -3,17 +3,20 @@
 //! [`HttpRegistry`]: super::http_remote::HttpRegistry
 //! [`RemoteRegistry`]: super::remote::RemoteRegistry
 
-use anyhow::Context;
+use crate::util::interning::InternedString;
+use anyhow::Context as _;
 use cargo_credential::Operation;
 use cargo_util::registry::make_dep_path;
 use cargo_util::Sha256;
 
+use crate::core::global_cache_tracker;
 use crate::core::PackageId;
 use crate::sources::registry::MaybeLock;
 use crate::sources::registry::RegistryConfig;
 use crate::util::auth;
+use crate::util::cache_lock::CacheLockMode;
 use crate::util::errors::CargoResult;
-use crate::util::{Config, Filesystem};
+use crate::util::{Filesystem, GlobalContext};
 use std::fmt::Write as FmtWrite;
 use std::fs::{self, File, OpenOptions};
 use std::io::prelude::*;
@@ -32,13 +35,14 @@ const CHECKSUM_TEMPLATE: &str = "{sha256-checksum}";
 /// This is primarily called by [`RegistryData::download`](super::RegistryData::download).
 pub(super) fn download(
     cache_path: &Filesystem,
-    config: &Config,
+    gctx: &GlobalContext,
+    encoded_registry_name: InternedString,
     pkg: PackageId,
     checksum: &str,
     registry_config: RegistryConfig,
 ) -> CargoResult<MaybeLock> {
     let path = cache_path.join(&pkg.tarball_name());
-    let path = config.assert_package_cache_locked(&path);
+    let path = gctx.assert_package_cache_locked(CacheLockMode::DownloadExclusive, &path);
 
     // Attempt to open a read-only copy first to avoid an exclusive write
     // lock and also work with read-only filesystems. Note that we check the
@@ -49,6 +53,13 @@ pub(super) fn download(
     if let Ok(dst) = File::open(path) {
         let meta = dst.metadata()?;
         if meta.len() > 0 {
+            gctx.deferred_global_last_use()?.mark_registry_crate_used(
+                global_cache_tracker::RegistryCrate {
+                    encoded_registry_name,
+                    crate_filename: pkg.tarball_name().into(),
+                    size: meta.len(),
+                },
+            );
             return Ok(MaybeLock::Ready(dst));
         }
     }
@@ -80,11 +91,12 @@ pub(super) fn download(
 
     let authorization = if registry_config.auth_required {
         Some(auth::auth_token(
-            config,
+            gctx,
             &pkg.source_id(),
             None,
             Operation::Read,
             vec![],
+            true,
         )?)
     } else {
         None
@@ -103,7 +115,8 @@ pub(super) fn download(
 /// This is primarily called by [`RegistryData::finish_download`](super::RegistryData::finish_download).
 pub(super) fn finish_download(
     cache_path: &Filesystem,
-    config: &Config,
+    gctx: &GlobalContext,
+    encoded_registry_name: InternedString,
     pkg: PackageId,
     checksum: &str,
     data: &[u8],
@@ -113,10 +126,17 @@ pub(super) fn finish_download(
     if actual != checksum {
         anyhow::bail!("failed to verify the checksum of `{}`", pkg)
     }
+    gctx.deferred_global_last_use()?.mark_registry_crate_used(
+        global_cache_tracker::RegistryCrate {
+            encoded_registry_name,
+            crate_filename: pkg.tarball_name().into(),
+            size: data.len() as u64,
+        },
+    );
 
     cache_path.create_dir()?;
     let path = cache_path.join(&pkg.tarball_name());
-    let path = config.assert_package_cache_locked(&path);
+    let path = gctx.assert_package_cache_locked(CacheLockMode::DownloadExclusive, &path);
     let mut dst = OpenOptions::new()
         .create(true)
         .read(true)
@@ -139,11 +159,11 @@ pub(super) fn finish_download(
 /// This is primarily called by [`RegistryData::is_crate_downloaded`](super::RegistryData::is_crate_downloaded).
 pub(super) fn is_crate_downloaded(
     cache_path: &Filesystem,
-    config: &Config,
+    gctx: &GlobalContext,
     pkg: PackageId,
 ) -> bool {
     let path = cache_path.join(pkg.tarball_name());
-    let path = config.assert_package_cache_locked(&path);
+    let path = gctx.assert_package_cache_locked(CacheLockMode::DownloadExclusive, &path);
     if let Ok(meta) = fs::metadata(path) {
         return meta.len() > 0;
     }

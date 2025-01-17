@@ -1,5 +1,4 @@
 # cargo-add(1)
-
 ## NAME
 
 cargo-add --- Add dependencies to a Cargo.toml manifest file
@@ -8,7 +7,7 @@ cargo-add --- Add dependencies to a Cargo.toml manifest file
 
 `cargo add` [_options_] _crate_...\
 `cargo add` [_options_] `--path` _path_\
-`cargo add` [_options_] `--git` _url_ [_crate_...]\
+`cargo add` [_options_] `--git` _url_ [_crate_...]
 
 
 ## DESCRIPTION
@@ -32,7 +31,7 @@ When you add a package that is already present, the existing entry will be updat
 Upon successful invocation, the enabled (`+`) and disabled (`-`) [features] of the specified
 dependency will be listed in the command's output.
 
-[features]: ../reference/features.md
+[features]: ../reference/features.html
 
 ## OPTIONS
 
@@ -60,12 +59,16 @@ dependency will be listed in the command's output.
 <dd class="option-desc"><a href="../reference/specifying-dependencies.html#specifying-path-dependencies">Filesystem path</a> to local crate to add.</dd>
 
 
+<dt class="option-term" id="option-cargo-add---base"><a class="option-anchor" href="#option-cargo-add---base"></a><code>--base</code> <em>base</em></dt>
+<dd class="option-desc">The <a href="../reference/unstable.html#path-bases">path base</a> to use when adding a local crate.</p>
+<p><a href="../reference/unstable.html#path-bases">Unstable (nightly-only)</a></dd>
+
+
 <dt class="option-term" id="option-cargo-add---registry"><a class="option-anchor" href="#option-cargo-add---registry"></a><code>--registry</code> <em>registry</em></dt>
 <dd class="option-desc">Name of the registry to use. Registry names are defined in <a href="../reference/config.html">Cargo config
 files</a>. If not specified, the default registry is used,
 which is defined by the <code>registry.default</code> config key which defaults to
 <code>crates-io</code>.</dd>
-
 
 
 </dl>
@@ -109,6 +112,18 @@ which is defined by the <code>registry.default</code> config key which defaults 
 <dd class="option-desc">Mark the dependency as <a href="../reference/features.html#optional-dependencies">required</a>.</dd>
 
 
+<dt class="option-term" id="option-cargo-add---public"><a class="option-anchor" href="#option-cargo-add---public"></a><code>--public</code></dt>
+<dd class="option-desc">Mark the dependency as public.</p>
+<p>The dependency can be referenced in your library’s public API.</p>
+<p><a href="../reference/unstable.html#public-dependency">Unstable (nightly-only)</a></dd>
+
+
+<dt class="option-term" id="option-cargo-add---no-public"><a class="option-anchor" href="#option-cargo-add---no-public"></a><code>--no-public</code></dt>
+<dd class="option-desc">Mark the dependency as private.</p>
+<p>While you can use the crate in your implementation, it cannot be referenced in your public API.</p>
+<p><a href="../reference/unstable.html#public-dependency">Unstable (nightly-only)</a></dd>
+
+
 <dt class="option-term" id="option-cargo-add---no-default-features"><a class="option-anchor" href="#option-cargo-add---no-default-features"></a><code>--no-default-features</code></dt>
 <dd class="option-desc">Disable the <a href="../reference/features.html#dependency-features">default features</a>.</dd>
 
@@ -124,14 +139,6 @@ activate</a>. When adding multiple
 crates, the features for a specific crate may be enabled with
 <code>package-name/feature-name</code> syntax. This flag may be specified multiple times,
 which enables all specified features.</dd>
-
-
-<dt class="option-term" id="option-cargo-add---ignore-rust-version"><a class="option-anchor" href="#option-cargo-add---ignore-rust-version"></a><code>--ignore-rust-version</code></dt>
-<dd class="option-desc">Ignore <code>rust-version</code> specification in packages.</p>
-<p>This option is unstable and available only on the
-<a href="https://doc.rust-lang.org/book/appendix-07-nightly-rust.html">nightly channel</a>
-and requires the <code>-Z unstable-options</code> flag to enable.
-See <a href="https://github.com/rust-lang/cargo/issues/5579">https://github.com/rust-lang/cargo/issues/5579</a> for more information.</dd>
 
 
 </dl>
@@ -166,7 +173,6 @@ terminal.</li>
 <p>May also be specified with the <code>term.color</code>
 <a href="../reference/config.html">config value</a>.</dd>
 
-
 </dl>
 
 ### Manifest Options
@@ -177,21 +183,25 @@ terminal.</li>
 <code>Cargo.toml</code> file in the current directory or any parent directory.</dd>
 
 
-
 <dt class="option-term" id="option-cargo-add--p"><a class="option-anchor" href="#option-cargo-add--p"></a><code>-p</code> <em>spec</em></dt>
 <dt class="option-term" id="option-cargo-add---package"><a class="option-anchor" href="#option-cargo-add---package"></a><code>--package</code> <em>spec</em></dt>
 <dd class="option-desc">Add dependencies to only the specified package.</dd>
 
 
-<dt class="option-term" id="option-cargo-add---frozen"><a class="option-anchor" href="#option-cargo-add---frozen"></a><code>--frozen</code></dt>
+<dt class="option-term" id="option-cargo-add---ignore-rust-version"><a class="option-anchor" href="#option-cargo-add---ignore-rust-version"></a><code>--ignore-rust-version</code></dt>
+<dd class="option-desc">Ignore <code>rust-version</code> specification in packages.</dd>
+
+
 <dt class="option-term" id="option-cargo-add---locked"><a class="option-anchor" href="#option-cargo-add---locked"></a><code>--locked</code></dt>
-<dd class="option-desc">Either of these flags requires that the <code>Cargo.lock</code> file is
-up-to-date. If the lock file is missing, or it needs to be updated, Cargo will
-exit with an error. The <code>--frozen</code> flag also prevents Cargo from
-attempting to access the network to determine if it is out-of-date.</p>
-<p>These may be used in environments where you want to assert that the
-<code>Cargo.lock</code> file is up-to-date (such as a CI build) or want to avoid network
-access.</dd>
+<dd class="option-desc">Asserts that the exact same dependencies and versions are used as when the
+existing <code>Cargo.lock</code> file was originally generated. Cargo will exit with an
+error when either of the following scenarios arises:</p>
+<ul>
+<li>The lock file is missing.</li>
+<li>Cargo attempted to change the lock file due to a different dependency resolution.</li>
+</ul>
+<p>It may be used in environments where deterministic builds are desired,
+such as in CI pipelines.</dd>
 
 
 <dt class="option-term" id="option-cargo-add---offline"><a class="option-anchor" href="#option-cargo-add---offline"></a><code>--offline</code></dt>
@@ -206,6 +216,21 @@ See the <a href="cargo-fetch.html">cargo-fetch(1)</a> command to download depend
 offline.</p>
 <p>May also be specified with the <code>net.offline</code> <a href="../reference/config.html">config value</a>.</dd>
 
+
+<dt class="option-term" id="option-cargo-add---frozen"><a class="option-anchor" href="#option-cargo-add---frozen"></a><code>--frozen</code></dt>
+<dd class="option-desc">Equivalent to specifying both <code>--locked</code> and <code>--offline</code>.</dd>
+
+
+<dt class="option-term" id="option-cargo-add---lockfile-path"><a class="option-anchor" href="#option-cargo-add---lockfile-path"></a><code>--lockfile-path</code> <em>PATH</em></dt>
+<dd class="option-desc">Changes the path of the lockfile from the default (<code>&lt;workspace_root&gt;/Cargo.lock</code>) to <em>PATH</em>. <em>PATH</em> must end with
+<code>Cargo.lock</code> (e.g. <code>--lockfile-path /tmp/temporary-lockfile/Cargo.lock</code>). Note that providing
+<code>--lockfile-path</code> will ignore existing lockfile at the default path, and instead will
+either use the lockfile from <em>PATH</em>, or write a new lockfile into the provided <em>PATH</em> if it doesn’t exist.
+This flag can be used to run most commands in read-only directories, writing lockfile into the provided <em>PATH</em>.</p>
+<p>This option is only available on the <a href="https://doc.rust-lang.org/book/appendix-07-nightly-rust.html">nightly
+channel</a> and
+requires the <code>-Z unstable-options</code> flag to enable (see
+<a href="https://github.com/rust-lang/cargo/issues/14421">#14421</a>).</dd>
 
 </dl>
 
@@ -249,18 +274,15 @@ requires the <code>-Z unstable-options</code> flag to enable (see
 
 </dl>
 
-
 ## ENVIRONMENT
 
 See [the reference](../reference/environment-variables.html) for
 details on environment variables that Cargo reads.
 
-
 ## EXIT STATUS
 
 * `0`: Cargo succeeded.
 * `101`: Cargo failed to complete.
-
 
 ## EXAMPLES
 

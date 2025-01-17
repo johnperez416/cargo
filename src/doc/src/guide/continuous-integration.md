@@ -1,6 +1,6 @@
-## Continuous Integration
+# Continuous Integration
 
-### Getting Started
+## Getting Started
 
 A basic CI will build and test your projects:
 
@@ -29,7 +29,7 @@ jobs:
           - beta
           - nightly
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - run: rustup update ${{ matrix.toolchain }} && rustup default ${{ matrix.toolchain }}
       - run: cargo build --verbose
       - run: cargo test --verbose
@@ -105,7 +105,26 @@ channel, but any breakage in nightly will not fail your overall build. Please
 see the [builds.sr.ht documentation](https://man.sr.ht/builds.sr.ht/) for more
 information.
 
-### Verifying Latest Dependencies
+
+### CircleCI
+
+To test your package on CircleCI, here is a sample `.circleci/config.yml` file:
+
+```yaml
+version: 2.1
+jobs:
+  build:
+    docker:
+      # check https://circleci.com/developer/images/image/cimg/rust#image-tags for latest
+      - image: cimg/rust:1.77.2
+    steps:
+      - checkout
+      - run: cargo test
+```
+
+To run more complex pipelines, including flaky test detection, caching, and artifact management, please see [CircleCI Configuration Reference](https://circleci.com/docs/configuration-reference/).
+
+## Verifying Latest Dependencies
 
 When [specifying dependencies](../reference/specifying-dependencies.md) in
 `Cargo.toml`, they generally match a range of versions.
@@ -118,7 +137,7 @@ When testing the latest versions some considerations are:
 - Rate of new dependencies being published
 - Level of risk a project is willing to accept
 - CI costs, including indirect costs like if a CI service has a maximum for
-  parallel runners, causing new jobs to be serialized when at the maxium.
+  parallel runners, causing new jobs to be serialized when at the maximum.
 
 Some potential solutions include:
 - [Not checking in the `Cargo.lock`](../faq.md#why-have-cargolock-in-version-control)
@@ -139,22 +158,51 @@ Some potential solutions include:
   - Only uses the resources necessary
   - Can configure the frequency to balance CI resources and coverage of dependency versions
 
-An example CI job to verify latest dependencies, using Github Actions:
+An example CI job to verify latest dependencies, using GitHub Actions:
 ```yaml
 jobs:
   latest_deps:
     name: Latest Dependencies
     runs-on: ubuntu-latest
     continue-on-error: true
+    env:
+      CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: allow
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - run: rustup update stable && rustup default stable
       - run: cargo update --verbose
       - run: cargo build --verbose
       - run: cargo test --verbose
 ```
+Notes:
+- [`CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS`](../reference/config.md#resolverincompatible-rust-versions) is set to ensure the [resolver](../reference/resolver.md) doesn't limit selected dependencies because of your project's [Rust version](../reference/rust-version.md).
+
 For projects with higher risks of per-platform or per-Rust version failures,
 more combinations may want to be tested.
+
+## Verifying `rust-version`
+
+When publishing packages that specify [`rust-version`](../reference/manifest.md#the-rust-version-field),
+it is important to verify the correctness of that field.
+
+Some third-party tools that can help with this include:
+- [`cargo-msrv`](https://crates.io/crates/cargo-msrv)
+- [`cargo-hack`](https://crates.io/crates/cargo-hack)
+
+An example of one way to do this, using GitHub Actions:
+```yaml
+jobs:
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: taiki-e/install-action@cargo-hack
+    - run: cargo hack check --rust-version --workspace --all-targets --ignore-private
+```
+This tries to balance thoroughness with turnaround time:
+- A single platform is used as most projects are platform-agnostic, trusting platform-specific dependencies to verify their behavior.
+- `cargo check` is used as most issues contributors will run into are API availability and not behavior.
+- Unpublished packages are skipped as this assumes only consumers of the verified project, through a registry, will care about `rust-version`.
 
 [`cargo add`]: ../commands/cargo-add.md
 [`cargo install`]: ../commands/cargo-install.md

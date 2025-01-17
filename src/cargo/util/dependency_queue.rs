@@ -25,7 +25,7 @@ pub struct DependencyQueue<N: Hash + Eq, E: Hash + Eq, V> {
     /// package.
     ///
     /// This map is statically known and does not get updated throughout the
-    /// lifecycle of the DependencyQueue.
+    /// lifecycle of the `DependencyQueue`.
     ///
     /// This is sort of like a `HashMap<(N, E), HashSet<N>>` map, but more
     /// easily indexable with just an `N`
@@ -113,7 +113,7 @@ impl<N: Hash + Eq + Clone, E: Eq + Hash + Clone, V> DependencyQueue<N, E, V> {
 
         /// Creates a flattened reverse dependency list. For a given key, finds the
         /// set of nodes which depend on it, including transitively. This is different
-        /// from self.reverse_dep_map because self.reverse_dep_map only maps one level
+        /// from `self.reverse_dep_map` because `self.reverse_dep_map` only maps one level
         /// of reverse dependencies.
         fn depth<'a, N: Hash + Eq + Clone, E: Hash + Eq + Clone>(
             key: &N,
@@ -181,9 +181,8 @@ impl<N: Hash + Eq + Clone, E: Eq + Hash + Clone, V> DependencyQueue<N, E, V> {
     pub fn finish(&mut self, node: &N, edge: &E) -> Vec<&N> {
         // hashset<Node>
         let reverse_deps = self.reverse_dep_map.get(node).and_then(|map| map.get(edge));
-        let reverse_deps = match reverse_deps {
-            Some(deps) => deps,
-            None => return Vec::new(),
+        let Some(reverse_deps) = reverse_deps else {
+            return Vec::new();
         };
         let key = (node.clone(), edge.clone());
         let mut result = Vec::new();

@@ -6,17 +6,23 @@ use anyhow::format_err;
 use cargo::core::{GitReference, SourceId, Workspace};
 use cargo::ops;
 use cargo::util::IntoUrl;
-use cargo::util::ToSemver;
-use cargo::util::VersionReqExt;
+use cargo::util::VersionExt;
 use cargo::CargoResult;
+use itertools::Itertools;
 use semver::VersionReq;
 
 use cargo_util::paths;
 
 pub fn cli() -> Command {
     subcommand("install")
-        .about("Install a Rust binary. Default location is $HOME/.cargo/bin")
-        .arg(Arg::new("crate").value_parser(parse_crate).num_args(0..))
+        .about("Install a Rust binary")
+        .arg(
+            Arg::new("crate")
+                .value_name("CRATE[@<VER>]")
+                .help("Select the package from the given source")
+                .value_parser(parse_crate)
+                .num_args(0..),
+        )
         .arg(
             opt("version", "Specify a version to install")
                 .alias("vers")
@@ -57,20 +63,21 @@ pub fn cli() -> Command {
                 .requires("git"),
         )
         .arg(
-            opt("path", "Filesystem path to local crate to install")
+            opt("path", "Filesystem path to local crate to install from")
                 .value_name("PATH")
                 .conflicts_with_all(&["git", "index", "registry"]),
         )
         .arg(opt("root", "Directory to install packages into").value_name("DIR"))
         .arg(flag("force", "Force overwriting existing crates or binaries").short('f'))
+        .arg_dry_run("Perform all checks without installing (unstable)")
         .arg(flag("no-track", "Do not save tracking information"))
         .arg(flag(
             "list",
-            "list all installed packages and their versions",
+            "List all installed packages and their versions",
         ))
         .arg_ignore_rust_version()
         .arg_message_format()
-        .arg_quiet()
+        .arg_silent_suggestion()
         .arg_targets_bins_examples(
             "Install only the specified binary",
             "Install all binaries",
@@ -79,30 +86,37 @@ pub fn cli() -> Command {
         )
         .arg_features()
         .arg_parallel()
-        .arg(flag(
-            "debug",
-            "Build in debug mode (with the 'dev' profile) instead of release mode",
-        ))
+        .arg(
+            flag(
+                "debug",
+                "Build in debug mode (with the 'dev' profile) instead of release mode",
+            )
+            .conflicts_with("profile"),
+        )
+        .arg_redundant_default_mode("release", "install", "debug")
         .arg_profile("Install artifacts with the specified profile")
         .arg_target_triple("Build for the target triple")
         .arg_target_dir()
         .arg_timings()
-        .after_help("Run `cargo help install` for more detailed information.\n")
+        .arg_lockfile_path()
+        .after_help(color_print::cstr!(
+            "Run `<cyan,bold>cargo help install</>` for more detailed information.\n"
+        ))
 }
 
-pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
-    let path = args.value_of_path("path", config);
+pub fn exec(gctx: &mut GlobalContext, args: &ArgMatches) -> CliResult {
+    let path = args.value_of_path("path", gctx);
     if let Some(path) = &path {
-        config.reload_rooted_at(path)?;
+        gctx.reload_rooted_at(path)?;
     } else {
         // TODO: Consider calling set_search_stop_path(home).
-        config.reload_rooted_at(config.home().clone().into_path_unlocked())?;
+        gctx.reload_rooted_at(gctx.home().clone().into_path_unlocked())?;
     }
 
     // In general, we try to avoid normalizing paths in Cargo,
     // but in these particular cases we need it to fix rust-lang/cargo#10283.
     // (Handle `SourceId::for_path` and `Workspace::new`,
-    // but not `Config::reload_rooted_at` which is always cwd)
+    // but not `GlobalContext::reload_rooted_at` which is always cwd)
     let path = path.map(|p| paths::normalize_path(&p));
 
     let version = args.get_one::<VersionReq>("version");
@@ -110,6 +124,7 @@ pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
         .get_many::<CrateVersion>("crate")
         .unwrap_or_default()
         .cloned()
+        .dedup_by(|x, y| x == y)
         .map(|(krate, local_version)| resolve_crate(krate, local_version, version))
         .collect::<crate::CargoResult<Vec<_>>>()?;
 
@@ -120,6 +135,16 @@ pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
     Use `cargo +{toolchain} install` if you meant to use the `{toolchain}` toolchain."
             )
             .into());
+        }
+
+        if let Ok(url) = crate_name.into_url() {
+            if matches!(url.scheme(), "http" | "https") {
+                return Err(anyhow!(
+                    "invalid package name: `{url}`
+    Use `cargo install --git {url}` if you meant to install from a git repository."
+                )
+                .into());
+            }
         }
     }
 
@@ -141,13 +166,14 @@ pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
         SourceId::for_path(path)?
     } else if krates.is_empty() {
         from_cwd = true;
-        SourceId::for_path(config.cwd())?
-    } else if let Some(index) = args.get_one::<String>("index") {
-        SourceId::for_registry(&index.into_url()?)?
-    } else if let Some(registry) = args.registry(config)? {
-        SourceId::alt_registry(config, &registry)?
+        SourceId::for_path(gctx.cwd())?
+    } else if let Some(reg_or_index) = args.registry_or_index(gctx)? {
+        match reg_or_index {
+            ops::RegistryOrIndex::Registry(r) => SourceId::alt_registry(gctx, &r)?,
+            ops::RegistryOrIndex::Index(url) => SourceId::for_registry(&url)?,
+        }
     } else {
-        SourceId::crates_io(config)?
+        SourceId::crates_io(gctx)?
     };
 
     let root = args.get_one::<String>("root").map(String::as_str);
@@ -160,28 +186,37 @@ pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
     // This workspace information is for emitting helpful messages from
     // `ArgMatchesExt::compile_options` and won't affect the actual compilation.
     let workspace = if from_cwd {
-        args.workspace(config).ok()
+        args.workspace(gctx).ok()
     } else if let Some(path) = &path {
-        Workspace::new(&path.join("Cargo.toml"), config).ok()
+        Workspace::new(&path.join("Cargo.toml"), gctx).ok()
     } else {
         None
     };
 
     let mut compile_opts = args.compile_options(
-        config,
+        gctx,
         CompileMode::Build,
         workspace.as_ref(),
         ProfileChecking::Custom,
     )?;
 
     compile_opts.build_config.requested_profile =
-        args.get_profile_name(config, "release", ProfileChecking::Custom)?;
+        args.get_profile_name("release", ProfileChecking::Custom)?;
+    if args.dry_run() {
+        gctx.cli_unstable().fail_if_stable_opt("--dry-run", 11123)?;
+    }
+
+    let requested_lockfile_path = args.lockfile_path(gctx)?;
+    // 14421: lockfile path should imply --locked on running `install`
+    if requested_lockfile_path.is_some() {
+        gctx.set_locked(true);
+    }
 
     if args.flag("list") {
-        ops::install_list(root, config)?;
+        ops::install_list(root, gctx)?;
     } else {
         ops::install(
-            config,
+            gctx,
             root,
             krates,
             source,
@@ -189,6 +224,8 @@ pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
             &compile_opts,
             args.flag("force"),
             args.flag("no-track"),
+            args.dry_run(),
+            requested_lockfile_path.as_deref(),
         )?;
     }
     Ok(())
@@ -242,8 +279,8 @@ fn parse_semver_flag(v: &str) -> CargoResult<VersionReq> {
             ),
         }
     } else {
-        match v.to_semver() {
-            Ok(v) => Ok(VersionReq::exact(&v)),
+        match v.trim().parse::<semver::Version>() {
+            Ok(v) => Ok(v.to_exact_req()),
             Err(e) => {
                 let mut msg = e.to_string();
 
@@ -251,7 +288,7 @@ fn parse_semver_flag(v: &str) -> CargoResult<VersionReq> {
                 // requirement, add a note to the warning
                 if v.parse::<VersionReq>().is_ok() {
                     msg.push_str(&format!(
-                        "\n\n  tip: if you want to specify semver range, \
+                        "\n\n  tip: if you want to specify SemVer range, \
                              add an explicit qualifier, like '^{}'",
                         v
                     ));

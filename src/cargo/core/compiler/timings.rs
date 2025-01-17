@@ -4,11 +4,12 @@
 //! long it takes for different units to compile.
 use super::{CompileMode, Unit};
 use crate::core::compiler::job_queue::JobId;
-use crate::core::compiler::{BuildContext, Context, TimingOutput};
+use crate::core::compiler::{BuildContext, BuildRunner, TimingOutput};
 use crate::core::PackageId;
 use crate::util::cpu::State;
 use crate::util::machine_message::{self, Message};
-use crate::util::{CargoResult, Config};
+use crate::util::style;
+use crate::util::{CargoResult, GlobalContext};
 use anyhow::Context as _;
 use cargo_util::paths;
 use std::collections::HashMap;
@@ -23,8 +24,8 @@ use std::time::{Duration, Instant, SystemTime};
 /// receives messages from spawned off threads.
 ///
 /// [`JobQueue`]: super::JobQueue
-pub struct Timings<'cfg> {
-    config: &'cfg Config,
+pub struct Timings<'gctx> {
+    gctx: &'gctx GlobalContext,
     /// Whether or not timings should be captured.
     enabled: bool,
     /// If true, saves an HTML report to disk.
@@ -94,8 +95,8 @@ struct Concurrency {
     inactive: usize,
 }
 
-impl<'cfg> Timings<'cfg> {
-    pub fn new(bcx: &BuildContext<'_, 'cfg>, root_units: &[Unit]) -> Timings<'cfg> {
+impl<'gctx> Timings<'gctx> {
+    pub fn new(bcx: &BuildContext<'_, 'gctx>, root_units: &[Unit]) -> Timings<'gctx> {
         let has_report = |what| bcx.build_config.timing_outputs.contains(&what);
         let report_html = has_report(TimingOutput::Html);
         let report_json = has_report(TimingOutput::Json);
@@ -131,11 +132,11 @@ impl<'cfg> Timings<'cfg> {
         };
 
         Timings {
-            config: bcx.config,
+            gctx: bcx.gctx,
             enabled,
             report_html,
             report_json,
-            start: bcx.config.creation_time(),
+            start: bcx.gctx.creation_time(),
             start_str,
             root_targets,
             profile,
@@ -193,9 +194,8 @@ impl<'cfg> Timings<'cfg> {
         // `id` may not always be active. "fresh" units unconditionally
         // generate `Message::Finish`, but this active map only tracks dirty
         // units.
-        let unit_time = match self.active.get_mut(&id) {
-            Some(ut) => ut,
-            None => return,
+        let Some(unit_time) = self.active.get_mut(&id) else {
+            return;
         };
         let t = self.start.elapsed().as_secs_f64();
         unit_time.rmeta_time = Some(t - unit_time.start);
@@ -211,9 +211,8 @@ impl<'cfg> Timings<'cfg> {
             return;
         }
         // See note above in `unit_rmeta_finished`, this may not always be active.
-        let mut unit_time = match self.active.remove(&id) {
-            Some(ut) => ut,
-            None => return,
+        let Some(mut unit_time) = self.active.remove(&id) else {
+            return;
         };
         let t = self.start.elapsed().as_secs_f64();
         unit_time.duration = t - unit_time.start;
@@ -223,14 +222,14 @@ impl<'cfg> Timings<'cfg> {
             .extend(unlocked.iter().cloned().cloned());
         if self.report_json {
             let msg = machine_message::TimingInfo {
-                package_id: unit_time.unit.pkg.package_id(),
+                package_id: unit_time.unit.pkg.package_id().to_spec(),
                 target: &unit_time.unit.target,
                 mode: unit_time.unit.mode,
                 duration: unit_time.duration,
                 rmeta_time: unit_time.rmeta_time,
             }
             .to_json_string();
-            crate::drop_println!(self.config, "{}", msg);
+            crate::drop_println!(self.gctx, "{}", msg);
         }
         self.unit_times.push(unit_time);
     }
@@ -264,9 +263,8 @@ impl<'cfg> Timings<'cfg> {
         if !self.enabled {
             return;
         }
-        let prev = match &mut self.last_cpu_state {
-            Some(state) => state,
-            None => return,
+        let Some(prev) = &mut self.last_cpu_state else {
+            return;
         };
         // Don't take samples too frequently, even if requested.
         let now = Instant::now();
@@ -290,7 +288,7 @@ impl<'cfg> Timings<'cfg> {
     /// Call this when all units are finished.
     pub fn finished(
         &mut self,
-        cx: &Context<'_, '_>,
+        build_runner: &BuildRunner<'_, '_>,
         error: &Option<anyhow::Error>,
     ) -> CargoResult<()> {
         if !self.enabled {
@@ -300,17 +298,21 @@ impl<'cfg> Timings<'cfg> {
         self.unit_times
             .sort_unstable_by(|a, b| a.start.partial_cmp(&b.start).unwrap());
         if self.report_html {
-            self.report_html(cx, error)
-                .with_context(|| "failed to save timing report")?;
+            self.report_html(build_runner, error)
+                .context("failed to save timing report")?;
         }
         Ok(())
     }
 
     /// Save HTML report to disk.
-    fn report_html(&self, cx: &Context<'_, '_>, error: &Option<anyhow::Error>) -> CargoResult<()> {
+    fn report_html(
+        &self,
+        build_runner: &BuildRunner<'_, '_>,
+        error: &Option<anyhow::Error>,
+    ) -> CargoResult<()> {
         let duration = self.start.elapsed().as_secs_f64();
         let timestamp = self.start_str.replace(&['-', ':'][..], "");
-        let timings_path = cx.files().host_root().join("cargo-timings");
+        let timings_path = build_runner.files().host_root().join("cargo-timings");
         paths::create_dir_all(&timings_path)?;
         let filename = timings_path.join(format!("cargo-timing-{}.html", timestamp));
         let mut f = BufWriter::new(paths::create(&filename)?);
@@ -320,7 +322,7 @@ impl<'cfg> Timings<'cfg> {
             .map(|(name, _targets)| name.as_str())
             .collect();
         f.write_all(HTML_TMPL.replace("{ROOTS}", &roots.join(", ")).as_bytes())?;
-        self.write_summary_table(&mut f, duration, cx.bcx, error)?;
+        self.write_summary_table(&mut f, duration, build_runner.bcx, error)?;
         f.write_all(HTML_CANVAS.as_bytes())?;
         self.write_unit_table(&mut f)?;
         // It helps with pixel alignment to use whole numbers.
@@ -341,18 +343,16 @@ impl<'cfg> Timings<'cfg> {
             include_str!("timings.js")
         )?;
         drop(f);
-        let msg = format!(
-            "report saved to {}",
-            std::env::current_dir()
-                .unwrap_or_default()
-                .join(&filename)
-                .display()
-        );
+
         let unstamped_filename = timings_path.join("cargo-timing.html");
         paths::link_or_copy(&filename, &unstamped_filename)?;
-        self.config
-            .shell()
-            .status_with_color("Timing", msg, termcolor::Color::Cyan)?;
+
+        let mut shell = self.gctx.shell();
+        let timing_path = std::env::current_dir().unwrap_or_default().join(&filename);
+        let link = shell.err_file_hyperlink(&timing_path);
+        let msg = format!("report saved to {link}{}{link:#}", timing_path.display(),);
+        shell.status_with_color("Timing", msg, &style::NOTE)?;
+
         Ok(())
     }
 
@@ -382,14 +382,7 @@ impl<'cfg> Timings<'cfg> {
             .unwrap_or_else(|_| "n/a".into());
         let rustc_info = render_rustc_info(bcx);
         let error_msg = match error {
-            Some(e) => format!(
-                r#"\
-  <tr>
-    <td class="error-text">Error:</td><td>{}</td>
-  </tr>
-"#,
-                e
-            ),
+            Some(e) => format!(r#"<tr><td class="error-text">Error:</td><td>{e}</td></tr>"#),
             None => "".to_string(),
         };
         write!(
@@ -574,7 +567,7 @@ impl<'cfg> Timings<'cfg> {
 }
 
 impl UnitTime {
-    /// Returns the codegen time as (rmeta_time, codegen_time, percent of total)
+    /// Returns the codegen time as (`rmeta_time`, `codegen_time`, percent of total)
     fn codegen_time(&self) -> Option<(f64, f64, f64)> {
         self.rmeta_time.map(|rmeta_time| {
             let ctime = self.duration - rmeta_time;
@@ -616,8 +609,64 @@ static HTML_TMPL: &str = r#"
   <title>Cargo Build Timings — {ROOTS}</title>
   <meta charset="utf-8">
 <style type="text/css">
+:root {
+  --error-text: #e80000;
+  --text: #000;
+  --background: #fff;
+  --h1-border-bottom: #c0c0c0;
+  --table-box-shadow: rgba(0, 0, 0, 0.1);
+  --table-th: #d5dde5;
+  --table-th-background: #1b1e24;
+  --table-th-border-bottom: #9ea7af;
+  --table-th-border-right: #343a45;
+  --table-tr-border-top: #c1c3d1;
+  --table-tr-border-bottom: #c1c3d1;
+  --table-tr-odd-background: #ebebeb;
+  --table-td-background: #ffffff;
+  --table-td-border-right: #C1C3D1;
+  --canvas-background: #f7f7f7;
+  --canvas-axes: #303030;
+  --canvas-grid: #e6e6e6;
+  --canvas-block: #aa95e8;
+  --canvas-custom-build: #f0b165;
+  --canvas-not-custom-build: #95cce8;
+  --canvas-dep-line: #ddd;
+  --canvas-dep-line-highlighted: #000;
+  --canvas-cpu: rgba(250, 119, 0, 0.2);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --error-text: #e80000;
+    --text: #fff;
+    --background: #121212;
+    --h1-border-bottom: #444;
+    --table-box-shadow: rgba(255, 255, 255, 0.1);
+    --table-th: #a0a0a0;
+    --table-th-background: #2c2c2c;
+    --table-th-border-bottom: #555;
+    --table-th-border-right: #444;
+    --table-tr-border-top: #333;
+    --table-tr-border-bottom: #333;
+    --table-tr-odd-background: #1e1e1e;
+    --table-td-background: #262626;
+    --table-td-border-right: #333;
+    --canvas-background: #1a1a1a;
+    --canvas-axes: #b0b0b0;
+    --canvas-grid: #333;
+    --canvas-block: #aa95e8;
+    --canvas-custom-build: #f0b165;
+    --canvas-not-custom-build: #95cce8;
+    --canvas-dep-line: #444;
+    --canvas-dep-line-highlighted: #fff;
+    --canvas-cpu: rgba(250, 119, 0, 0.2);
+  }
+}
+
 html {
   font-family: sans-serif;
+  color: var(--text);
+  background: var(--background);
 }
 
 .canvas-container {
@@ -627,7 +676,7 @@ html {
 }
 
 h1 {
-  border-bottom: 1px solid #c0c0c0;
+  border-bottom: 1px solid var(--h1-border-bottom);
 }
 
 .graph {
@@ -638,14 +687,14 @@ h1 {
   margin-top: 20px;
   margin-bottom: 20px;
   border-collapse: collapse;
-  box-shadow: 0 5px 10px rgba(0, 0, 0, 0.1);
+  box-shadow: 0 5px 10px var(--table-box-shadow);
 }
 
 .my-table th {
-  color: #d5dde5;
-  background: #1b1e24;
-  border-bottom: 4px solid #9ea7af;
-  border-right: 1px solid #343a45;
+  color: var(--table-th);
+  background: var(--table-th-background);
+  border-bottom: 4px solid var(--table-th-border-bottom);
+  border-right: 1px solid var(--table-th-border-right);
   font-size: 18px;
   font-weight: 100;
   padding: 12px;
@@ -663,8 +712,8 @@ h1 {
 }
 
 .my-table tr {
-  border-top: 1px solid #c1c3d1;
-  border-bottom: 1px solid #c1c3d1;
+  border-top: 1px solid var(--table-tr-border-top);
+  border-bottom: 1px solid var(--table-tr-border-bottom);
   font-size: 16px;
   font-weight: normal;
 }
@@ -678,7 +727,7 @@ h1 {
 }
 
 .my-table tr:nth-child(odd) td {
-  background: #ebebeb;
+  background: var(--table-tr-odd-background);
 }
 
 .my-table tr:last-child td:first-child {
@@ -690,13 +739,13 @@ h1 {
 }
 
 .my-table td {
-  background: #ffffff;
+  background: var(--table-td-background);
   padding: 10px;
   text-align: left;
   vertical-align: middle;
   font-weight: 300;
   font-size: 14px;
-  border-right: 1px solid #C1C3D1;
+  border-right: 1px solid var(--table-td-border-right);
 }
 
 .my-table td:last-child {
@@ -713,7 +762,7 @@ h1 {
 }
 
 .error-text {
-  color: #e80000;
+  color: var(--error-text);
 }
 
 </style>

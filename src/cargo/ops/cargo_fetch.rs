@@ -2,13 +2,13 @@ use crate::core::compiler::standard_lib;
 use crate::core::compiler::{BuildConfig, CompileMode, RustcTargetData};
 use crate::core::{PackageSet, Resolve, Workspace};
 use crate::ops;
-use crate::util::config::JobsConfig;
+use crate::util::context::JobsConfig;
 use crate::util::CargoResult;
-use crate::util::Config;
+use crate::util::GlobalContext;
 use std::collections::HashSet;
 
 pub struct FetchOptions<'a> {
-    pub config: &'a Config,
+    pub gctx: &'a GlobalContext,
     /// The target arch triple to fetch dependencies for
     pub targets: Vec<String>,
 }
@@ -19,18 +19,14 @@ pub fn fetch<'a>(
     options: &FetchOptions<'a>,
 ) -> CargoResult<(Resolve, PackageSet<'a>)> {
     ws.emit_warnings()?;
-    let (mut packages, resolve) = ops::resolve_ws(ws)?;
+    let dry_run = false;
+    let (mut packages, resolve) = ops::resolve_ws(ws, dry_run)?;
 
     let jobs = Some(JobsConfig::Integer(1));
     let keep_going = false;
-    let config = ws.config();
-    let build_config = BuildConfig::new(
-        config,
-        jobs,
-        keep_going,
-        &options.targets,
-        CompileMode::Build,
-    )?;
+    let gctx = ws.gctx();
+    let build_config =
+        BuildConfig::new(gctx, jobs, keep_going, &options.targets, CompileMode::Build)?;
     let mut data = RustcTargetData::new(ws, &build_config.requested_kinds)?;
     let mut fetched_packages = HashSet::new();
     let mut deps_to_fetch = ws.members().map(|p| p.package_id()).collect::<Vec<_>>();
@@ -68,14 +64,19 @@ pub fn fetch<'a>(
     }
 
     // If -Zbuild-std was passed, download dependencies for the standard library.
-    // We don't know ahead of time what jobs we'll be running, so tell `std_crates` that.
-    if let Some(crates) = standard_lib::std_crates(config, None) {
-        let (std_package_set, _, _) =
-            standard_lib::resolve_std(ws, &mut data, &build_config, &crates)?;
+    if let Some(crates) = &gctx.cli_unstable().build_std {
+        let (std_package_set, _, _) = standard_lib::resolve_std(
+            ws,
+            &mut data,
+            &build_config,
+            crates,
+            &build_config.requested_kinds,
+        )?;
         packages.add_set(std_package_set);
     }
 
     packages.get_many(to_download)?;
+    crate::core::gc::auto_gc(gctx);
 
     Ok((resolve, packages))
 }

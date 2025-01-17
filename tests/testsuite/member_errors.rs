@@ -3,11 +3,12 @@
 use cargo::core::resolver::ResolveError;
 use cargo::core::{compiler::CompileMode, Shell, Workspace};
 use cargo::ops::{self, CompileOptions};
-use cargo::util::{config::Config, errors::ManifestError};
-
-use cargo_test_support::install::cargo_home;
+use cargo::util::{context::GlobalContext, errors::ManifestError};
+use cargo_test_support::paths;
+use cargo_test_support::prelude::*;
 use cargo_test_support::project;
 use cargo_test_support::registry;
+use cargo_test_support::str;
 
 /// Tests inclusion of a `ManifestError` pointing to a member manifest
 /// when that manifest fails to deserialize.
@@ -44,18 +45,20 @@ fn toml_deserialize_manifest_error() {
         .file("bar/src/main.rs", "fn main() {}")
         .build();
 
-    let root_manifest_path = p.root().join("Cargo.toml");
-    let member_manifest_path = p.root().join("bar").join("Cargo.toml");
+    p.cargo("check")
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[ERROR] invalid string
+expected `"`, `'`
+ --> bar/Cargo.toml:8:25
+  |
+8 |                 foobar == "0.55"
+  |                         ^
+  |
+[ERROR] failed to load manifest for dependency `bar`
 
-    let error = Workspace::new(&root_manifest_path, &Config::default().unwrap()).unwrap_err();
-    eprintln!("{:?}", error);
-
-    let manifest_err: &ManifestError = error.downcast_ref().expect("Not a ManifestError");
-    assert_eq!(manifest_err.manifest_path(), &root_manifest_path);
-
-    let causes: Vec<_> = manifest_err.manifest_causes().collect();
-    assert_eq!(causes.len(), 1, "{:?}", causes);
-    assert_eq!(causes[0].manifest_path(), &member_manifest_path);
+"#]])
+        .run();
 }
 
 /// Tests inclusion of a `ManifestError` pointing to a member manifest
@@ -97,7 +100,8 @@ fn member_manifest_path_io_error() {
     let member_manifest_path = p.root().join("bar").join("Cargo.toml");
     let missing_manifest_path = p.root().join("bar").join("nosuch").join("Cargo.toml");
 
-    let error = Workspace::new(&root_manifest_path, &Config::default().unwrap()).unwrap_err();
+    let error =
+        Workspace::new(&root_manifest_path, &GlobalContext::default().unwrap()).unwrap_err();
     eprintln!("{:?}", error);
 
     let manifest_err: &ManifestError = error.downcast_ref().expect("Not a ManifestError");
@@ -145,13 +149,13 @@ fn member_manifest_version_error() {
 
     // Prevent this test from accessing the network by setting up .cargo/config.
     registry::init();
-    let config = Config::new(
+    let gctx = GlobalContext::new(
         Shell::from_write(Box::new(Vec::new())),
-        cargo_home(),
-        cargo_home(),
+        paths::cargo_home(),
+        paths::cargo_home(),
     );
-    let ws = Workspace::new(&p.root().join("Cargo.toml"), &config).unwrap();
-    let compile_options = CompileOptions::new(&config, CompileMode::Build).unwrap();
+    let ws = Workspace::new(&p.root().join("Cargo.toml"), &gctx).unwrap();
+    let compile_options = CompileOptions::new(&gctx, CompileMode::Build).unwrap();
     let member_bar = ws.members().find(|m| &*m.name() == "bar").unwrap();
 
     let error = ops::compile(&ws, &compile_options).map(|_| ()).unwrap_err();

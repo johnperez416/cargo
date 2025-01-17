@@ -5,18 +5,22 @@ use cargo::ops;
 pub fn cli() -> Command {
     subcommand("init")
         .about("Create a new cargo package in an existing directory")
-        .arg(Arg::new("path").action(ArgAction::Set).default_value("."))
+        .arg(
+            Arg::new("path")
+                .value_name("PATH")
+                .action(ArgAction::Set)
+                .default_value("."),
+        )
         .arg_new_opts()
-        .arg(opt("registry", "Registry to use").value_name("REGISTRY"))
-        .arg_quiet()
-        .after_help("Run `cargo help init` for more detailed information.\n")
+        .arg_registry("Registry to use")
+        .arg_silent_suggestion()
+        .after_help(color_print::cstr!(
+            "Run `<cyan,bold>cargo help init</>` for more detailed information.\n"
+        ))
 }
 
-pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
-    let opts = args.new_options(config)?;
-    let project_kind = ops::init(&opts, config)?;
-    config
-        .shell()
-        .status("Created", format!("{} package", project_kind))?;
+pub fn exec(gctx: &mut GlobalContext, args: &ArgMatches) -> CliResult {
+    let opts = args.new_options(gctx)?;
+    ops::init(&opts, gctx)?;
     Ok(())
 }

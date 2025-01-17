@@ -4,19 +4,20 @@ use std::collections::HashMap;
 use std::fs;
 use std::str;
 
-use serde::Serialize;
-
 use cargo_test_support::cargo_process;
 use cargo_test_support::git;
 use cargo_test_support::paths;
+use cargo_test_support::prelude::*;
 use cargo_test_support::registry::{cksum, Package};
+use cargo_test_support::str;
 use cargo_test_support::{basic_manifest, project, t, ProjectBuilder};
+use serde::Serialize;
 
 fn setup() {
     let root = paths::root();
     t!(fs::create_dir(&root.join(".cargo")));
     t!(fs::write(
-        root.join(".cargo/config"),
+        root.join(".cargo/config.toml"),
         r#"
             [source.crates-io]
             replace-with = 'my-awesome-local-registry'
@@ -91,6 +92,7 @@ fn simple() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
@@ -104,13 +106,13 @@ fn simple() {
         .build();
 
     p.cargo("check")
-        .with_stderr(
-            "\
+        .with_stderr_data(str![[r#"
+[LOCKING] 1 package to latest compatible version
 [CHECKING] bar v0.1.0
-[CHECKING] foo v0.1.0 ([CWD])
-[FINISHED] [..]
-",
-        )
+[CHECKING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }
 
@@ -129,6 +131,7 @@ fn simple_install() {
                 [package]
                 name = "bar"
                 version = "0.1.0"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
@@ -142,17 +145,17 @@ fn simple_install() {
         .build();
 
     cargo_process("install bar")
-        .with_stderr(
-            "\
+        .with_stderr_data(str![[r#"
 [INSTALLING] bar v0.1.0
+[LOCKING] 1 package to latest compatible version
 [COMPILING] foo v0.0.1
 [COMPILING] bar v0.1.0
-[FINISHED] release [optimized] target(s) in [..]s
+[FINISHED] `release` profile [optimized] target(s) in [ELAPSED]s
 [INSTALLING] [..]bar[..]
 [INSTALLED] package `bar v0.1.0` (executable `bar[EXE]`)
-[WARNING] be sure to add `[..]` to your PATH to be able to run the installed binaries
-",
-        )
+[WARNING] be sure to add `[ROOT]/home/.cargo/bin` to your PATH to be able to run the installed binaries
+
+"#]])
         .run();
 }
 
@@ -171,6 +174,7 @@ fn simple_install_fail() {
                 [package]
                 name = "bar"
                 version = "0.1.0"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
@@ -186,20 +190,19 @@ fn simple_install_fail() {
 
     cargo_process("install bar")
         .with_status(101)
-        .with_stderr(
-            "  Installing bar v0.1.0
-error: failed to compile `bar v0.1.0`, intermediate artifacts can be found at `[..]`.
-To reuse those artifacts with a future compilation, set the environment variable \
-`CARGO_TARGET_DIR` to that path.
+        .with_stderr_data(str![[r#"
+[INSTALLING] bar v0.1.0
+[ERROR] failed to compile `bar v0.1.0`, intermediate artifacts can be found at `[..]`.
+To reuse those artifacts with a future compilation, set the environment variable `CARGO_TARGET_DIR` to that path.
 
 Caused by:
   no matching package found
   searched package name: `baz`
   perhaps you meant:      bar or foo
-  location searched: registry `crates-io`
+  location searched: directory source `[ROOT]/index` (which is replacing registry `crates-io`)
   required by package `bar v0.1.0`
-",
-        )
+
+"#]])
         .run();
 }
 
@@ -218,6 +221,7 @@ fn install_without_feature_dep() {
                 [package]
                 name = "bar"
                 version = "0.1.0"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
@@ -235,17 +239,17 @@ fn install_without_feature_dep() {
         .build();
 
     cargo_process("install bar")
-        .with_stderr(
-            "\
+        .with_stderr_data(str![[r#"
 [INSTALLING] bar v0.1.0
+[LOCKING] 1 package to latest compatible version
 [COMPILING] foo v0.0.1
 [COMPILING] bar v0.1.0
-[FINISHED] release [optimized] target(s) in [..]s
+[FINISHED] `release` profile [optimized] target(s) in [ELAPSED]s
 [INSTALLING] [..]bar[..]
 [INSTALLED] package `bar v0.1.0` (executable `bar[EXE]`)
-[WARNING] be sure to add `[..]` to your PATH to be able to run the installed binaries
-",
-        )
+[WARNING] be sure to add `[ROOT]/home/.cargo/bin` to your PATH to be able to run the installed binaries
+
+"#]])
         .run();
 }
 
@@ -262,6 +266,7 @@ fn not_there() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
@@ -276,13 +281,12 @@ fn not_there() {
 
     p.cargo("check")
         .with_status(101)
-        .with_stderr(
-            "\
-error: no matching package named `bar` found
-location searched: [..]
-required by package `foo v0.1.0 ([..])`
-",
-        )
+        .with_stderr_data(str![[r#"
+[ERROR] no matching package named `bar` found
+location searched: directory source `[ROOT]/index` (which is replacing registry `crates-io`)
+required by package `foo v0.1.0 ([ROOT]/foo)`
+
+"#]])
         .run();
 }
 
@@ -309,6 +313,7 @@ fn multiple() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
@@ -322,13 +327,14 @@ fn multiple() {
         .build();
 
     p.cargo("check")
-        .with_stderr(
-            "\
+        .with_stderr_data(str![[r#"
+[LOCKING] 1 package to latest compatible version
+[ADDING] bar v0.1.0 (available: v0.2.0)
 [CHECKING] bar v0.1.0
-[CHECKING] foo v0.1.0 ([CWD])
-[FINISHED] [..]
-",
-        )
+[CHECKING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }
 
@@ -341,6 +347,7 @@ fn crates_io_then_directory() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
@@ -358,16 +365,16 @@ fn crates_io_then_directory() {
         .publish();
 
     p.cargo("check")
-        .with_stderr(
-            "\
-[UPDATING] `[..]` index
+        .with_stderr_data(str![[r#"
+[UPDATING] `dummy-registry` index
+[LOCKING] 1 package to latest compatible version
 [DOWNLOADING] crates ...
-[DOWNLOADED] bar v0.1.0 ([..])
+[DOWNLOADED] bar v0.1.0 (registry `dummy-registry`)
 [CHECKING] bar v0.1.0
-[CHECKING] foo v0.1.0 ([CWD])
-[FINISHED] [..]
-",
-        )
+[CHECKING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 
     setup();
@@ -379,13 +386,12 @@ fn crates_io_then_directory() {
     v.build();
 
     p.cargo("check")
-        .with_stderr(
-            "\
+        .with_stderr_data(str![[r#"
 [CHECKING] bar v0.1.0
-[CHECKING] foo v0.1.0 ([CWD])
-[FINISHED] [..]
-",
-        )
+[CHECKING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }
 
@@ -398,6 +404,7 @@ fn crates_io_then_bad_checksum() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
@@ -419,9 +426,8 @@ fn crates_io_then_bad_checksum() {
 
     p.cargo("check")
         .with_status(101)
-        .with_stderr(
-            "\
-error: checksum for `bar v0.1.0` changed between lock files
+        .with_stderr_data(str![[r#"
+[ERROR] checksum for `bar v0.1.0` changed between lock files
 
 this could be indicative of a few possible errors:
 
@@ -431,8 +437,8 @@ this could be indicative of a few possible errors:
 
 unable to verify that `bar v0.1.0` is the same as when the lockfile was generated
 
-",
-        )
+
+"#]])
         .run();
 }
 
@@ -457,6 +463,7 @@ fn bad_file_checksum() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
@@ -468,17 +475,15 @@ fn bad_file_checksum() {
 
     p.cargo("check")
         .with_status(101)
-        .with_stderr(
-            "\
-error: the listed checksum of `[..]lib.rs` has changed:
+        .with_stderr_data(str![[r#"
+[LOCKING] 1 package to latest compatible version
+[ERROR] the listed checksum of `[ROOT]/index/bar/src/lib.rs` has changed:
 expected: [..]
 actual:   [..]
 
-directory sources are not intended to be edited, if modifications are \
-required then it is recommended that `[patch]` is used with a forked copy of \
-the source
-",
-        )
+directory sources are not intended to be edited, if modifications are required then it is recommended that `[patch]` is used with a forked copy of the source
+
+"#]])
         .run();
 }
 
@@ -502,6 +507,7 @@ fn only_dot_files_ok() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
@@ -535,6 +541,7 @@ fn random_files_ok() {
                 [package]
                 name = "foo"
                 version = "0.1.0"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
@@ -568,6 +575,7 @@ fn git_lock_file_doesnt_change() {
                     [package]
                     name = "foo"
                     version = "0.0.1"
+                    edition = "2015"
                     authors = []
 
                     [dependencies]
@@ -586,7 +594,7 @@ fn git_lock_file_doesnt_change() {
     let root = paths::root();
     t!(fs::create_dir(&root.join(".cargo")));
     t!(fs::write(
-        root.join(".cargo/config"),
+        root.join(".cargo/config.toml"),
         format!(
             r#"
                 [source.my-git-repo]
@@ -601,13 +609,12 @@ fn git_lock_file_doesnt_change() {
     ));
 
     p.cargo("check")
-        .with_stderr(
-            "\
-[CHECKING] [..]
-[CHECKING] [..]
-[FINISHED] [..]
-",
-        )
+        .with_stderr_data(str![[r#"
+[CHECKING] git v0.5.0 ([..])
+[CHECKING] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 
     let lock2 = p.read_lockfile();
@@ -629,6 +636,7 @@ fn git_override_requires_lockfile() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
@@ -641,7 +649,7 @@ fn git_override_requires_lockfile() {
     let root = paths::root();
     t!(fs::create_dir(&root.join(".cargo")));
     t!(fs::write(
-        root.join(".cargo/config"),
+        root.join(".cargo/config.toml"),
         r#"
             [source.my-git-repo]
             git = 'https://example.com/'
@@ -654,9 +662,8 @@ fn git_override_requires_lockfile() {
 
     p.cargo("check")
         .with_status(101)
-        .with_stderr(
-            "\
-[ERROR] failed to get `git` as a dependency of package `foo v0.0.1 ([..])`
+        .with_stderr_data(str![[r#"
+[ERROR] failed to get `git` as a dependency of package `foo v0.0.1 ([ROOT]/foo)`
 
 Caused by:
   failed to load source for dependency `git`
@@ -670,8 +677,8 @@ Caused by:
 
   remove the source replacement configuration, generate a lock file, and then
   restore the source replacement configuration to continue the build
-",
-        )
+
+"#]])
         .run();
 }
 
@@ -685,6 +692,7 @@ fn workspace_different_locations() {
                 [package]
                 name = 'foo'
                 version = '0.1.0'
+                edition = "2015"
 
                 [dependencies]
                 baz = "*"
@@ -700,6 +708,7 @@ fn workspace_different_locations() {
                 [package]
                 name = 'bar'
                 version = '0.1.0'
+                edition = "2015"
 
                 [dependencies]
                 baz = "*"
@@ -707,7 +716,7 @@ fn workspace_different_locations() {
         )
         .file("bar/src/lib.rs", "")
         .file(
-            ".cargo/config",
+            ".cargo/config.toml",
             r#"
                 [build]
                 target-dir = './target'
@@ -724,12 +733,12 @@ fn workspace_different_locations() {
     p.cargo("check").cwd("foo").run();
     p.cargo("check")
         .cwd("bar")
-        .with_stderr(
-            "\
-[CHECKING] bar [..]
-[FINISHED] [..]
-",
-        )
+        .with_stderr_data(str![[r#"
+[LOCKING] 1 package to latest compatible version
+[CHECKING] bar v0.1.0 ([ROOT]/foo/bar)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }
 
@@ -748,6 +757,7 @@ fn version_missing() {
                 [package]
                 name = "bar"
                 version = "0.1.0"
+                edition = "2015"
                 authors = []
 
                 [dependencies]
@@ -758,21 +768,99 @@ fn version_missing() {
         .build();
 
     cargo_process("install bar")
-        .with_stderr(
-            "\
+        .with_stderr_data(str![[r#"
 [INSTALLING] bar v0.1.0
-error: failed to compile [..], intermediate artifacts can be found at `[..]`.
-To reuse those artifacts with a future compilation, set the environment variable \
-`CARGO_TARGET_DIR` to that path.
+[ERROR] failed to compile [..], intermediate artifacts can be found at `[..]`.
+To reuse those artifacts with a future compilation, set the environment variable `CARGO_TARGET_DIR` to that path.
 
 Caused by:
-  failed to select a version for the requirement `foo = \"^2\"`
+  failed to select a version for the requirement `foo = "^2"`
   candidate versions found which didn't match: 0.0.1
   location searched: directory source `[..] (which is replacing registry `[..]`)
   required by package `bar v0.1.0`
   perhaps a crate was updated and forgotten to be re-vendored?
-",
-        )
+
+"#]])
         .with_status(101)
+        .run();
+}
+
+#[cargo_test]
+fn root_dir_diagnostics() {
+    let p = ProjectBuilder::new(paths::root())
+        .no_manifest() // we are placing it in a different dir
+        .file(
+            "ws_root/Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.1.0"
+                edition = "2015"
+                authors = []
+            "#,
+        )
+        .file("ws_root/src/lib.rs", "invalid;")
+        .build();
+
+    // Crucially, the rustc error message below says `ws_root/...`, i.e.
+    // it is relative to our fake home, not to the workspace root.
+    p.cargo("check")
+        .arg("-Zroot-dir=.")
+        .arg("--manifest-path=ws_root/Cargo.toml")
+        .masquerade_as_nightly_cargo(&["-Zroot-dir"])
+        .with_status(101)
+        .with_stderr_data(str![[r#"
+[CHECKING] foo v0.1.0 ([ROOT]/ws_root)
+[ERROR] [..]
+ --> ws_root/src/lib.rs:1:8
+  |
+1 | invalid;
+  | [..]
+
+[ERROR] could not compile `foo` (lib) due to 1 previous error
+
+"#]])
+        .run();
+}
+
+#[cargo_test]
+fn root_dir_file_macro() {
+    let p = ProjectBuilder::new(paths::root())
+        .no_manifest() // we are placing it in a different dir
+        .file(
+            "ws_root/Cargo.toml",
+            r#"
+                [package]
+                name = "foo"
+                version = "0.1.0"
+                edition = "2015"
+                authors = []
+            "#,
+        )
+        .file(
+            "ws_root/src/main.rs",
+            r#"fn main() { println!("{}", file!()); }"#,
+        )
+        .build();
+
+    // Crucially, the path is relative to our fake home, not to the workspace root.
+    p.cargo("run")
+        .arg("-Zroot-dir=.")
+        .arg("--manifest-path=ws_root/Cargo.toml")
+        .masquerade_as_nightly_cargo(&["-Zroot-dir"])
+        .with_stdout_data(str![[r#"
+ws_root/src/main.rs
+
+"#]])
+        .run();
+    // Try again with an absolute path for `root-dir`.
+    p.cargo("run")
+        .arg(format!("-Zroot-dir={}", p.root().display()))
+        .arg("--manifest-path=ws_root/Cargo.toml")
+        .masquerade_as_nightly_cargo(&["-Zroot-dir"])
+        .with_stdout_data(str![[r#"
+ws_root/src/main.rs
+
+"#]])
         .run();
 }

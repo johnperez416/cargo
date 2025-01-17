@@ -11,35 +11,36 @@ use crate::drop_print;
 use crate::drop_println;
 use crate::util::important_paths::find_root_manifest_for_wd;
 use crate::CargoResult;
-use crate::Config;
+use crate::GlobalContext;
+
+use super::RegistryOrIndex;
 
 pub struct OwnersOptions {
     pub krate: Option<String>,
     pub token: Option<Secret<String>>,
-    pub index: Option<String>,
+    pub reg_or_index: Option<RegistryOrIndex>,
     pub to_add: Option<Vec<String>>,
     pub to_remove: Option<Vec<String>>,
     pub list: bool,
-    pub registry: Option<String>,
 }
 
-pub fn modify_owners(config: &Config, opts: &OwnersOptions) -> CargoResult<()> {
+pub fn modify_owners(gctx: &GlobalContext, opts: &OwnersOptions) -> CargoResult<()> {
     let name = match opts.krate {
         Some(ref name) => name.clone(),
         None => {
-            let manifest_path = find_root_manifest_for_wd(config.cwd())?;
-            let ws = Workspace::new(&manifest_path, config)?;
+            let manifest_path = find_root_manifest_for_wd(gctx.cwd())?;
+            let ws = Workspace::new(&manifest_path, gctx)?;
             ws.current()?.package_id().name().to_string()
         }
     };
 
     let operation = Operation::Owners { name: &name };
-
+    let source_ids = super::get_source_id(gctx, opts.reg_or_index.as_ref())?;
     let (mut registry, _) = super::registry(
-        config,
+        gctx,
+        &source_ids,
         opts.token.as_ref().map(Secret::as_deref),
-        opts.index.as_deref(),
-        opts.registry.as_deref(),
+        opts.reg_or_index.as_ref(),
         true,
         Some(operation),
     )?;
@@ -54,13 +55,12 @@ pub fn modify_owners(config: &Config, opts: &OwnersOptions) -> CargoResult<()> {
             )
         })?;
 
-        config.shell().status("Owner", msg)?;
+        gctx.shell().status("Owner", msg)?;
     }
 
     if let Some(ref v) = opts.to_remove {
         let v = v.iter().map(|s| &s[..]).collect::<Vec<_>>();
-        config
-            .shell()
+        gctx.shell()
             .status("Owner", format!("removing {:?} from crate {}", v, name))?;
         registry.remove_owners(&name, &v).with_context(|| {
             format!(
@@ -80,11 +80,11 @@ pub fn modify_owners(config: &Config, opts: &OwnersOptions) -> CargoResult<()> {
             )
         })?;
         for owner in owners.iter() {
-            drop_print!(config, "{}", owner.login);
+            drop_print!(gctx, "{}", owner.login);
             match (owner.name.as_ref(), owner.email.as_ref()) {
-                (Some(name), Some(email)) => drop_println!(config, " ({} <{}>)", name, email),
-                (Some(s), None) | (None, Some(s)) => drop_println!(config, " ({})", s),
-                (None, None) => drop_println!(config),
+                (Some(name), Some(email)) => drop_println!(gctx, " ({} <{}>)", name, email),
+                (Some(s), None) | (None, Some(s)) => drop_println!(gctx, " ({})", s),
+                (None, None) => drop_println!(gctx),
             }
         }
     }

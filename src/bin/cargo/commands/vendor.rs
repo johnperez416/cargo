@@ -36,9 +36,11 @@ pub fn cli() -> Command {
         .arg(unsupported("relative-path"))
         .arg(unsupported("only-git-deps"))
         .arg(unsupported("disallow-duplicates"))
-        .arg_quiet()
         .arg_manifest_path()
-        .after_help("Run `cargo help vendor` for more detailed information.\n")
+        .arg_lockfile_path()
+        .after_help(color_print::cstr!(
+            "Run `<cyan,bold>cargo help vendor</>` for more detailed information.\n"
+        ))
 }
 
 fn unsupported(name: &'static str) -> Arg {
@@ -53,16 +55,16 @@ fn unsupported(name: &'static str) -> Arg {
     flag(name, "").value_parser(value_parser).hide(true)
 }
 
-pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
+pub fn exec(gctx: &mut GlobalContext, args: &ArgMatches) -> CliResult {
     // We're doing the vendoring operation ourselves, so we don't actually want
     // to respect any of the `source` configuration in Cargo itself. That's
     // intended for other consumers of Cargo, but we want to go straight to the
     // source, e.g. crates.io, to fetch crates.
     if !args.flag("respect-source-config") {
-        config.values_mut()?.remove("source");
+        gctx.values_mut()?.remove("source");
     }
 
-    let ws = args.workspace(config)?;
+    let ws = args.workspace(gctx)?;
     let path = args
         .get_one::<PathBuf>("path")
         .cloned()

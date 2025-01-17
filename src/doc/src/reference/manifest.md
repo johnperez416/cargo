@@ -1,4 +1,4 @@
-## The Manifest Format
+# The Manifest Format
 
 The `Cargo.toml` file for each package is called its *manifest*. It is written
 in the [TOML] format. It contains metadata that is needed to compile the package. Checkout
@@ -12,7 +12,7 @@ Every manifest file consists of the following sections:
   * [`version`](#the-version-field) --- The version of the package.
   * [`authors`](#the-authors-field) --- The authors of the package.
   * [`edition`](#the-edition-field) --- The Rust edition.
-  * [`rust-version`](#the-rust-version-field) --- The minimal supported Rust version.
+  * [`rust-version`](rust-version.md) --- The minimal supported Rust version.
   * [`description`](#the-description-field) --- A description of the package.
   * [`documentation`](#the-documentation-field) --- URL of the package documentation.
   * [`readme`](#the-readme-field) --- Path to the package's README file.
@@ -30,6 +30,7 @@ Every manifest file consists of the following sections:
   * [`publish`](#the-publish-field) --- Can be used to prevent publishing the package.
   * [`metadata`](#the-metadata-table) --- Extra settings for external tools.
   * [`default-run`](#the-default-run-field) --- The default binary to run by [`cargo run`].
+  * [`autolib`](cargo-targets.md#target-auto-discovery) --- Disables library auto discovery.
   * [`autobins`](cargo-targets.md#target-auto-discovery) --- Disables binary auto discovery.
   * [`autoexamples`](cargo-targets.md#target-auto-discovery) --- Disables example auto discovery.
   * [`autotests`](cargo-targets.md#target-auto-discovery) --- Disables test auto discovery.
@@ -48,12 +49,13 @@ Every manifest file consists of the following sections:
   * [`[target]`](specifying-dependencies.md#platform-specific-dependencies) --- Platform-specific dependencies.
 * [`[badges]`](#the-badges-section) --- Badges to display on a registry.
 * [`[features]`](features.md) --- Conditional compilation features.
+* [`[lints]`](#the-lints-section) --- Configure linters for this package.
 * [`[patch]`](overriding-dependencies.md#the-patch-section) --- Override dependencies.
 * [`[replace]`](overriding-dependencies.md#the-replace-section) --- Override dependencies (deprecated).
 * [`[profile]`](profiles.md) --- Compiler settings and optimizations.
 * [`[workspace]`](workspaces.md) --- The workspace definition.
 
-### The `[package]` section
+## The `[package]` section
 
 The first section in a `Cargo.toml` is `[package]`.
 
@@ -61,15 +63,14 @@ The first section in a `Cargo.toml` is `[package]`.
 [package]
 name = "hello_world" # the name of the package
 version = "0.1.0"    # the current version, obeying semver
-authors = ["Alice <a@example.com>", "Bob <b@example.com>"]
 ```
 
-The only fields required by Cargo are [`name`](#the-name-field) and
-[`version`](#the-version-field). If publishing to a registry, the registry may
-require additional fields. See the notes below and [the publishing
-chapter][publishing] for requirements for publishing to [crates.io].
+The only field required by Cargo is [`name`](#the-name-field). If publishing to
+a registry, the registry may require additional fields. See the notes below and
+[the publishing chapter][publishing] for requirements for publishing to
+[crates.io].
 
-#### The `name` field
+### The `name` field
 
 The package name is an identifier used to refer to the package. It is used
 when listed as a dependency in another package, and as the default name of
@@ -88,35 +89,41 @@ a keyword. [crates.io] imposes even more restrictions, such as:
 
 [alphanumeric]: ../../std/primitive.char.html#method.is_alphanumeric
 
-#### The `version` field
+### The `version` field
 
-Cargo bakes in the concept of [Semantic
-Versioning](https://semver.org/), so make sure you follow some basic rules:
+The `version` field is formatted according to the [SemVer] specification:
 
-* Before you reach 1.0.0, anything goes, but if you make breaking changes,
-  increment the minor version. In Rust, breaking changes include adding fields to
-  structs or variants to enums.
-* After 1.0.0, only make breaking changes when you increment the major version.
-  Don’t break the build.
-* After 1.0.0, don’t add any new public API (no new `pub` anything) in patch-level
-  versions. Always increment the minor version if you add any new `pub` structs,
-  traits, fields, types, functions, methods or anything else.
-* Use version numbers with three numeric parts such as 1.0.0 rather than 1.0.
+Versions must have three numeric parts,
+the major version, the minor version, and the patch version.
 
+A pre-release part can be added after a dash such as `1.0.0-alpha`.
+The pre-release part may be separated with periods to distinguish separate
+components. Numeric components will use numeric comparison while
+everything else will be compared lexicographically.
+For example, `1.0.0-alpha.11` is higher than `1.0.0-alpha.4`.
+
+A metadata part can be added after a plus, such as `1.0.0+21AF26D3`.
+This is for informational purposes only and is generally ignored by Cargo.
+
+Cargo bakes in the concept of [Semantic Versioning](https://semver.org/),
+so versions are considered considered [compatible](semver.md) if their left-most non-zero major/minor/patch component is the same.
 See the [Resolver] chapter for more information on how Cargo uses versions to
-resolve dependencies, and for guidelines on setting your own version. See the
-[SemVer compatibility] chapter for more details on exactly what constitutes a
-breaking change.
+resolve dependencies.
 
+This field is optional and defaults to `0.0.0`.  The field is required for publishing packages.
+
+> **MSRV:** Before 1.75, this field was required
+
+[SemVer]: https://semver.org
 [Resolver]: resolver.md
 [SemVer compatibility]: semver.md
 
-#### The `authors` field
+### The `authors` field
+
+> **Warning**: This field is deprecated
 
 The optional `authors` field lists in an array the people or organizations that are considered
-the "authors" of the package. The exact meaning is open to interpretation --- it
-may list the original or primary authors, current maintainers, or owners of the
-package. An optional email address may be included within angled brackets at
+the "authors" of the package. An optional email address may be included within angled brackets at
 the end of each author entry.
 
 ```toml
@@ -125,15 +132,10 @@ the end of each author entry.
 authors = ["Graydon Hoare", "Fnu Lnu <no-reply@rust-lang.org>"]
 ```
 
-This field is only surfaced in package metadata and in the `CARGO_PKG_AUTHORS`
-environment variable within `build.rs`. It is not displayed in the [crates.io]
-user interface.
+This field is surfaced in package metadata and in the `CARGO_PKG_AUTHORS`
+environment variable within `build.rs` for backwards compatibility.
 
-> **Warning**: Package manifests cannot be changed once published, so this
-> field cannot be changed or removed in already-published versions of a
-> package.
-
-#### The `edition` field
+### The `edition` field
 
 The `edition` key is an optional key that affects which [Rust Edition] your package
 is compiled with. Setting the `edition` key in `[package]` will affect all
@@ -143,46 +145,25 @@ examples, etc.
 ```toml
 [package]
 # ...
-edition = '2021'
+edition = '2024'
 ```
 
 Most manifests have the `edition` field filled in automatically by [`cargo new`]
 with the latest stable edition. By default `cargo new` creates a manifest with
-the 2021 edition currently.
+the 2024 edition currently.
 
 If the `edition` field is not present in `Cargo.toml`, then the 2015 edition is
 assumed for backwards compatibility. Note that all manifests
 created with [`cargo new`] will not use this historical fallback because they
 will have `edition` explicitly specified to a newer value.
 
-#### The `rust-version` field
+### The `rust-version` field
 
-The `rust-version` field is an optional key that tells cargo what version of the
-Rust language and compiler your package can be compiled with. If the currently
-selected version of the Rust compiler is older than the stated version, cargo
-will exit with an error, telling the user what version is required.
+The `rust-version` field tells cargo what version of the
+Rust toolchain you support for your package.
+See [the Rust version chapter](rust-version.md) for more detail.
 
-The first version of Cargo that supports this field was released with Rust 1.56.0.
-In older releases, the field will be ignored, and Cargo will display a warning.
-
-```toml
-[package]
-# ...
-rust-version = "1.56"
-```
-
-The Rust version must be a bare version number with two or three components; it
-cannot include semver operators or pre-release identifiers. Compiler pre-release
-identifiers such as -nightly will be ignored while checking the Rust version.
-The `rust-version` must be equal to or newer than the version that first
-introduced the configured `edition`.
-
-The `rust-version` may be ignored using the `--ignore-rust-version` option.
-
-Setting the `rust-version` key in `[package]` will affect all targets/crates in
-the package, including test suites, benchmarks, binaries, examples, etc.
-
-#### The `description` field
+### The `description` field
 
 The description is a short blurb about the package. [crates.io] will display
 this with your package. This should be plain text (not Markdown).
@@ -195,7 +176,7 @@ description = "A short description of my package"
 
 > **Note**: [crates.io] requires the `description` to be set.
 
-#### The `documentation` field
+### The `documentation` field
 
 The `documentation` field specifies a URL to a website hosting the crate's
 documentation. If no URL is specified in the manifest file, [crates.io] will
@@ -210,7 +191,7 @@ documentation = "https://docs.rs/bitflags"
 
 [docs.rs queue]: https://docs.rs/releases/queue
 
-#### The `readme` field
+### The `readme` field
 
 The `readme` field should be the path to a file in the package root (relative
 to this `Cargo.toml`) that contains general information about the package.
@@ -229,7 +210,7 @@ file will be used. You can suppress this behavior by setting this field to
 `false`. If the field is set to `true`, a default value of `README.md` will
 be assumed.
 
-#### The `homepage` field
+### The `homepage` field
 
 The `homepage` field should be a URL to a site that is the home page for your
 package.
@@ -237,10 +218,14 @@ package.
 ```toml
 [package]
 # ...
-homepage = "https://serde.rs/"
+homepage = "https://serde.rs"
 ```
 
-#### The `repository` field
+A value should only be set for `homepage` if there is a dedicated website for
+the crate other than the source repository or API documentation. Do not make
+`homepage` redundant with either the `documentation` or `repository` values.
+
+### The `repository` field
 
 The `repository` field should be a URL to the source repository for your
 package.
@@ -248,19 +233,19 @@ package.
 ```toml
 [package]
 # ...
-repository = "https://github.com/rust-lang/cargo/"
+repository = "https://github.com/rust-lang/cargo"
 ```
 
-#### The `license` and `license-file` fields
+### The `license` and `license-file` fields
 
 The `license` field contains the name of the software license that the package
 is released under. The `license-file` field contains the path to a file
 containing the text of the license (relative to this `Cargo.toml`).
 
-[crates.io] interprets the `license` field as an [SPDX 2.1 license
-expression][spdx-2.1-license-expressions]. The name must be a known license
-from the [SPDX license list 3.11][spdx-license-list-3.11]. Parentheses are not
-currently supported. See the [SPDX site] for more information.
+[crates.io] interprets the `license` field as an [SPDX 2.3 license
+expression][spdx-2.3-license-expressions]. The name must be a known license
+from the [SPDX license list 3.20][spdx-license-list-3.20]. See the [SPDX site]
+for more information.
 
 SPDX license expressions support AND and OR operators to combine multiple
 licenses.[^slash]
@@ -293,7 +278,7 @@ license-file = "LICENSE.txt"
 [^slash]: Previously multiple licenses could be separated with a `/`, but that
 usage is deprecated.
 
-#### The `keywords` field
+### The `keywords` field
 
 The `keywords` field is an array of strings that describe this package. This
 can help when searching for the package on a registry, and you may choose any
@@ -305,11 +290,11 @@ words that would help someone find this crate.
 keywords = ["gamedev", "graphics"]
 ```
 
-> **Note**: [crates.io] has a maximum of 5 keywords. Each keyword must be
-> ASCII text, start with a letter, and only contain letters, numbers, `_` or
-> `-`, and have at most 20 characters.
+> **Note**: [crates.io] allows a maximum of 5 keywords. Each keyword must be
+> ASCII text, have at most 20 characters, start with an alphanumeric character,
+> and only contain letters, numbers, `_`, `-` or `+`.
 
-#### The `categories` field
+### The `categories` field
 
 The `categories` field is an array of strings of the categories this package
 belongs to.
@@ -322,7 +307,7 @@ categories = ["command-line-utilities", "development-tools::cargo-plugins"]
 > match one of the strings available at <https://crates.io/category_slugs>, and
 > must match exactly.
 
-#### The `workspace` field
+### The `workspace` field
 
 The `workspace` field can be used to configure the workspace that this package
 will be a member of. If not specified this will be inferred as the first
@@ -342,7 +327,7 @@ table defined. That is, a crate cannot both be a root crate in a workspace
 
 For more information, see the [workspaces chapter](workspaces.md).
 
-#### The `build` field
+### The `build` field
 
 The `build` field specifies a file in the package root which is a [build
 script] for building native code. More information can be found in the [build
@@ -361,7 +346,7 @@ The default is `"build.rs"`, which loads the script from a file named
 specify a path to a different file or `build = false` to disable automatic
 detection of the build script.
 
-#### The `links` field
+### The `links` field
 
 The `links` field specifies the name of a native library that is being linked
 to. More information can be found in the [`links`][links] section of the build
@@ -378,7 +363,7 @@ on Linux) may specify:
 links = "git2"
 ```
 
-#### The `exclude` and `include` fields
+### The `exclude` and `include` fields
 
 The `exclude` and `include` fields can be used to explicitly specify which
 files are included when packaging a project to be [published][publishing],
@@ -467,31 +452,30 @@ if any of those files change.
 
 [gitignore]: https://git-scm.com/docs/gitignore
 
-#### The `publish` field
+### The `publish` field
 
-The `publish` field can be used to prevent a package from being published to a
-package registry (like *crates.io*) by mistake, for instance to keep a package
-private in a company.
-
-```toml
-[package]
-# ...
-publish = false
-```
-
-The value may also be an array of strings which are registry names that are
-allowed to be published to.
-
+The `publish` field can be used to control which registries names the package
+may be published to:
 ```toml
 [package]
 # ...
 publish = ["some-registry-name"]
 ```
 
+To prevent a package from being published to a registry (like crates.io) by mistake,
+for instance to keep a package private in a company,
+you can omit the [`version`](#the-version-field) field.
+If you'd like to be more explicit, you can disable publishing:
+```toml
+[package]
+# ...
+publish = false
+```
+
 If publish array contains a single registry, `cargo publish` command will use
 it when `--registry` flag is not specified.
 
-#### The `metadata` table
+### The `metadata` table
 
 Cargo by default will warn about unused keys in `Cargo.toml` to assist in
 detecting typos and such. The `package.metadata` table, however, is completely
@@ -510,6 +494,10 @@ package-name = "my-awesome-android-app"
 assets = "path/to/static"
 ```
 
+You'll need to look in the documentation for your tool to see how to use this field.
+For Rust Projects that use `package.metadata` tables, see:
+- [docs.rs](https://docs.rs/about/metadata)
+
 There is a similar table at the workspace level at
 [`workspace.metadata`][workspace-metadata]. While cargo does not specify a
 format for the content of either of these tables, it is suggested that
@@ -519,7 +507,7 @@ if that makes sense for the tool in question.
 
 [workspace-metadata]: workspaces.md#the-metadata-table
 
-#### The `default-run` field
+### The `default-run` field
 
 The `default-run` field in the `[package]` section of the manifest can be used
 to specify a default binary picked by [`cargo run`]. For example, when there is
@@ -530,7 +518,54 @@ both `src/bin/a.rs` and `src/bin/b.rs`:
 default-run = "a"
 ```
 
-### The `[badges]` section
+## The `[lints]` section
+
+Override the default level of lints from different tools by assigning them to a new level in a
+table, for example:
+```toml
+[lints.rust]
+unsafe_code = "forbid"
+```
+
+This is short-hand for:
+```toml
+[lints.rust]
+unsafe_code = { level = "forbid", priority = 0 }
+```
+
+`level` corresponds to the [lint levels](https://doc.rust-lang.org/rustc/lints/levels.html) in `rustc`:
+- `forbid`
+- `deny`
+- `warn`
+- `allow`
+
+`priority` is a signed integer that controls which lints or lint groups override other lint groups:
+- lower (particularly negative) numbers have lower priority, being overridden
+  by higher numbers, and show up first on the command-line to tools like
+  `rustc`
+
+To know which table under `[lints]` a particular lint belongs under, it is the part before `::` in the lint
+name.  If there isn't a `::`, then the tool is `rust`.  For example a warning
+about `unsafe_code` would be `lints.rust.unsafe_code` but a lint about
+`clippy::enum_glob_use` would be `lints.clippy.enum_glob_use`.
+
+For example:
+```toml
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+enum_glob_use = "deny"
+```
+
+Generally, these will only affect local development of the current package.
+Cargo only applies these to the current package and not to dependencies.
+As for dependents, Cargo suppresses lints from non-path dependencies with features like
+[`--cap-lints`](../../rustc/lints/levels.html#capping-lints).
+
+> **MSRV:** Respected as of 1.74
+
+## The `[badges]` section
 
 The `[badges]` section is for specifying status badges that can be displayed
 on a registry website when the package is published.
@@ -565,13 +600,13 @@ on a registry website when the package is published.
 maintenance = { status = "..." }
 ```
 
-### Dependency sections
+## Dependency sections
 
 See the [specifying dependencies page](specifying-dependencies.md) for
 information on the `[dependencies]`, `[dev-dependencies]`,
 `[build-dependencies]`, and target-specific `[target.*.dependencies]` sections.
 
-### The `[profile.*]` sections
+## The `[profile.*]` sections
 
 The `[profile]` tables provide a way to customize compiler settings such as
 optimizations and debug settings. See [the Profiles chapter](profiles.md) for
@@ -587,9 +622,9 @@ more detail.
 [docs.rs]: https://docs.rs/
 [publishing]: publishing.md
 [Rust Edition]: ../../edition-guide/index.html
-[spdx-2.1-license-expressions]: https://spdx.org/spdx-specification-21-web-version#h.jxpfx0ykyb60
-[spdx-license-list-3.11]: https://github.com/spdx/license-list-data/tree/v3.11
-[SPDX site]: https://spdx.org/license-list
+[spdx-2.3-license-expressions]: https://spdx.github.io/spdx-spec/v2.3/SPDX-license-expressions/
+[spdx-license-list-3.20]: https://github.com/spdx/license-list-data/tree/v3.20
+[SPDX site]: https://spdx.org
 [TOML]: https://toml.io/
 
 <script>
@@ -624,6 +659,7 @@ more detail.
         "#the-exclude-and-include-fields-optional": "manifest.html#the-exclude-and-include-fields",
         "#the-publish--field-optional": "manifest.html#the-publish-field",
         "#the-metadata-table-optional": "manifest.html#the-metadata-table",
+        "#rust-version": "rust-version.html",
     };
     var target = fragments[window.location.hash];
     if (target) {

@@ -1,11 +1,12 @@
 //! Tests for the metabuild feature (declarative build scripts).
 
+use std::str;
+
+use cargo_test_support::prelude::*;
 use cargo_test_support::{
     basic_lib_manifest, basic_manifest, is_coarse_mtime, project, registry::Package, rustc_host,
-    Project,
+    str, Project,
 };
-
-use std::str;
 
 #[cargo_test]
 fn metabuild_gated() {
@@ -16,6 +17,7 @@ fn metabuild_gated() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 metabuild = ["mb"]
             "#,
         )
@@ -25,21 +27,17 @@ fn metabuild_gated() {
     p.cargo("check")
         .masquerade_as_nightly_cargo(&["metabuild"])
         .with_status(101)
-        .with_stderr(
-            "\
-error: failed to parse manifest at `[..]`
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
 
 Caused by:
   feature `metabuild` is required
 
-  The package requires the Cargo feature called `metabuild`, \
-  but that feature is not stabilized in this version of Cargo (1.[..]).
-  Consider adding `cargo-features = [\"metabuild\"]` to the top of Cargo.toml \
-  (above the [package] table) to tell Cargo you are opting in to use this unstable feature.
-  See https://doc.rust-lang.org/nightly/cargo/reference/unstable.html#metabuild \
-  for more information about the status of this feature.
-",
-        )
+  The package requires the Cargo feature called `metabuild`, but that feature is not stabilized in this version of Cargo ([..]).
+  Consider adding `cargo-features = ["metabuild"]` to the top of Cargo.toml (above the [package] table) to tell Cargo you are opting in to use this unstable feature.
+  See https://doc.rust-lang.org/nightly/cargo/reference/unstable.html#metabuild for more information about the status of this feature.
+
+"#]])
         .run();
 }
 
@@ -52,6 +50,7 @@ fn basic_project() -> Project {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 metabuild = ["mb", "mb-other"]
 
                 [build-dependencies]
@@ -71,6 +70,7 @@ fn basic_project() -> Project {
                 [package]
                 name = "mb-other"
                 version = "0.0.1"
+                edition = "2015"
             "#,
         )
         .file(
@@ -85,8 +85,11 @@ fn metabuild_basic() {
     let p = basic_project();
     p.cargo("check -vv")
         .masquerade_as_nightly_cargo(&["metabuild"])
-        .with_stdout_contains("[foo 0.0.1] Hello mb")
-        .with_stdout_contains("[foo 0.0.1] Hello mb-other")
+        .with_stdout_data(str![[r#"
+[foo 0.0.1] Hello mb
+[foo 0.0.1] Hello mb-other
+
+"#]])
         .run();
 }
 
@@ -100,6 +103,7 @@ fn metabuild_error_both() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 metabuild = "mb"
 
                 [build-dependencies]
@@ -118,14 +122,13 @@ fn metabuild_error_both() {
     p.cargo("check -vv")
         .masquerade_as_nightly_cargo(&["metabuild"])
         .with_status(101)
-        .with_stderr_contains(
-            "\
-error: failed to parse manifest at [..]
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
 
 Caused by:
   cannot specify both `metabuild` and `build`
-",
-        )
+
+"#]])
         .run();
 }
 
@@ -139,6 +142,7 @@ fn metabuild_missing_dep() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 metabuild = "mb"
             "#,
         )
@@ -148,13 +152,13 @@ fn metabuild_missing_dep() {
     p.cargo("check -vv")
         .masquerade_as_nightly_cargo(&["metabuild"])
         .with_status(101)
-        .with_stderr_contains(
-            "\
-error: failed to parse manifest at [..]
+        .with_stderr_data(str![[r#"
+[ERROR] failed to parse manifest at `[ROOT]/foo/Cargo.toml`
 
 Caused by:
-  metabuild package `mb` must be specified in `build-dependencies`",
-        )
+  metabuild package `mb` must be specified in `build-dependencies`
+
+"#]])
         .run();
 }
 
@@ -168,6 +172,7 @@ fn metabuild_optional_dep() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 metabuild = "mb"
 
                 [build-dependencies]
@@ -204,6 +209,7 @@ fn metabuild_lib_name() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 metabuild = "mb"
 
                 [build-dependencies]
@@ -217,6 +223,7 @@ fn metabuild_lib_name() {
                 [package]
                 name = "mb"
                 version = "0.0.1"
+                edition = "2015"
                 [lib]
                 name = "other"
             "#,
@@ -229,7 +236,10 @@ fn metabuild_lib_name() {
 
     p.cargo("check -vv")
         .masquerade_as_nightly_cargo(&["metabuild"])
-        .with_stdout_contains("[foo 0.0.1] Hello mb")
+        .with_stdout_data(str![[r#"
+[foo 0.0.1] Hello mb
+
+"#]])
         .run();
 }
 
@@ -252,6 +262,7 @@ fn metabuild_fresh() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 metabuild = "mb"
 
                 [build-dependencies]
@@ -274,13 +285,12 @@ fn metabuild_fresh() {
     p.cargo("check -vv")
         .masquerade_as_nightly_cargo(&["metabuild"])
         .with_stdout_does_not_contain("[foo 0.0.1] Hello mb")
-        .with_stderr(
-            "\
-[FRESH] mb [..]
-[FRESH] foo [..]
-[FINISHED] dev [..]
-",
-        )
+        .with_stderr_data(str![[r#"
+[FRESH] mb v0.5.0 ([ROOT]/foo/mb)
+[FRESH] foo v0.0.1 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }
 
@@ -294,6 +304,7 @@ fn metabuild_links() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 links = "cat"
                 metabuild = "mb"
 
@@ -317,7 +328,10 @@ fn metabuild_links() {
 
     p.cargo("check -vv")
         .masquerade_as_nightly_cargo(&["metabuild"])
-        .with_stdout_contains("[foo 0.0.1] Hello mb")
+        .with_stdout_data(str![[r#"
+[foo 0.0.1] Hello mb
+
+"#]])
         .run();
 }
 
@@ -331,6 +345,7 @@ fn metabuild_override() {
                 [package]
                 name = "foo"
                 version = "0.0.1"
+                edition = "2015"
                 links = "cat"
                 metabuild = "mb"
 
@@ -345,7 +360,7 @@ fn metabuild_override() {
             r#"pub fn metabuild() { panic!("should not run"); }"#,
         )
         .file(
-            ".cargo/config",
+            ".cargo/config.toml",
             &format!(
                 r#"
                     [target.{}.cat]
@@ -378,6 +393,7 @@ fn metabuild_workspace() {
                 [package]
                 name = "member1"
                 version = "0.0.1"
+                edition = "2015"
                 metabuild = ["mb1", "mb2"]
 
                 [build-dependencies]
@@ -393,6 +409,7 @@ fn metabuild_workspace() {
                 [package]
                 name = "member2"
                 version = "0.0.1"
+                edition = "2015"
                 metabuild = ["mb1"]
 
                 [build-dependencies]
@@ -458,97 +475,115 @@ fn metabuild_build_plan() {
 
     p.cargo("build --build-plan -Zunstable-options")
         .masquerade_as_nightly_cargo(&["metabuild", "build-plan"])
-        .with_json(
-            r#"
-            {
-                "invocations": [
-                    {
-                        "package_name": "mb",
-                        "package_version": "0.5.0",
-                        "target_kind": ["lib"],
-                        "compile_mode": "build",
-                        "kind": null,
-                        "deps": [],
-                        "outputs": [
-                            "[..]/target/debug/deps/libmb-[..].rlib",
-                            "[..]/target/debug/deps/libmb-[..].rmeta"
-                        ],
-                        "links": {},
-                        "program": "rustc",
-                        "args": "{...}",
-                        "env": "{...}",
-                        "cwd": "[..]"
-                    },
-                    {
-                        "package_name": "mb-other",
-                        "package_version": "0.0.1",
-                        "target_kind": ["lib"],
-                        "compile_mode": "build",
-                        "kind": null,
-                        "deps": [],
-                        "outputs": [
-                            "[..]/target/debug/deps/libmb_other-[..].rlib",
-                            "[..]/target/debug/deps/libmb_other-[..].rmeta"
-                        ],
-                        "links": {},
-                        "program": "rustc",
-                        "args": "{...}",
-                        "env": "{...}",
-                        "cwd": "[..]"
-                    },
-                    {
-                        "package_name": "foo",
-                        "package_version": "0.0.1",
-                        "target_kind": ["custom-build"],
-                        "compile_mode": "build",
-                        "kind": null,
-                        "deps": [0, 1],
-                        "outputs": "{...}",
-                        "links": "{...}",
-                        "program": "rustc",
-                        "args": "{...}",
-                        "env": "{...}",
-                        "cwd": "[..]"
-                    },
-                    {
-                        "package_name": "foo",
-                        "package_version": "0.0.1",
-                        "target_kind": ["custom-build"],
-                        "compile_mode": "run-custom-build",
-                        "kind": null,
-                        "deps": [2],
-                        "outputs": [],
-                        "links": {},
-                        "program": "[..]/foo/target/debug/build/foo-[..]/metabuild-foo",
-                        "args": [],
-                        "env": "{...}",
-                        "cwd": "[..]"
-                    },
-                    {
-                        "package_name": "foo",
-                        "package_version": "0.0.1",
-                        "target_kind": ["lib"],
-                        "compile_mode": "build",
-                        "kind": null,
-                        "deps": [3],
-                        "outputs": [
-                            "[..]/foo/target/debug/deps/libfoo-[..].rlib",
-                            "[..]/foo/target/debug/deps/libfoo-[..].rmeta"
-                        ],
-                        "links": "{...}",
-                        "program": "rustc",
-                        "args": "{...}",
-                        "env": "{...}",
-                        "cwd": "[..]"
-                    }
-                ],
-                "inputs": [
-                    "[..]/foo/Cargo.toml",
-                    "[..]/foo/mb/Cargo.toml",
-                    "[..]/foo/mb-other/Cargo.toml"
-                ]
-            }
-            "#,
+        .with_stdout_data(
+            str![[r#"
+{
+  "inputs": [
+    "[ROOT]/foo/Cargo.toml",
+    "[ROOT]/foo/mb/Cargo.toml",
+    "[ROOT]/foo/mb-other/Cargo.toml"
+  ],
+  "invocations": [
+    {
+      "args": "{...}",
+      "compile_mode": "build",
+      "cwd": "[ROOT]/foo",
+      "deps": [],
+      "env": "{...}",
+      "kind": null,
+      "links": {},
+      "outputs": [
+        "[ROOT]/foo/target/debug/deps/libmb-[HASH].rlib",
+        "[ROOT]/foo/target/debug/deps/libmb-[HASH].rmeta"
+      ],
+      "package_name": "mb",
+      "package_version": "0.5.0",
+      "program": "rustc",
+      "target_kind": [
+        "lib"
+      ]
+    },
+    {
+      "args": "{...}",
+      "compile_mode": "build",
+      "cwd": "[ROOT]/foo",
+      "deps": [],
+      "env": "{...}",
+      "kind": null,
+      "links": {},
+      "outputs": [
+        "[ROOT]/foo/target/debug/deps/libmb_other-[HASH].rlib",
+        "[ROOT]/foo/target/debug/deps/libmb_other-[HASH].rmeta"
+      ],
+      "package_name": "mb-other",
+      "package_version": "0.0.1",
+      "program": "rustc",
+      "target_kind": [
+        "lib"
+      ]
+    },
+    {
+      "args": "{...}",
+      "compile_mode": "build",
+      "cwd": "[ROOT]/foo",
+      "deps": [
+        0,
+        1
+      ],
+      "env": "{...}",
+      "kind": null,
+      "links": "{...}",
+      "outputs": "{...}",
+      "package_name": "foo",
+      "package_version": "0.0.1",
+      "program": "rustc",
+      "target_kind": [
+        "custom-build"
+      ]
+    },
+    {
+      "args": "{...}",
+      "compile_mode": "run-custom-build",
+      "cwd": "[ROOT]/foo",
+      "deps": [
+        2
+      ],
+      "env": "{...}",
+      "kind": null,
+      "links": {},
+      "outputs": [],
+      "package_name": "foo",
+      "package_version": "0.0.1",
+      "program": "[ROOT]/foo/target/debug/build/foo-[HASH]/metabuild-foo",
+      "target_kind": [
+        "custom-build"
+      ]
+    },
+    {
+      "args": "{...}",
+      "compile_mode": "build",
+      "cwd": "[ROOT]/foo",
+      "deps": [
+        3
+      ],
+      "env": "{...}",
+      "kind": null,
+      "links": "{...}",
+      "outputs": [
+        "[ROOT]/foo/target/debug/deps/libfoo-[HASH].rlib",
+        "[ROOT]/foo/target/debug/deps/libfoo-[HASH].rmeta"
+      ],
+      "package_name": "foo",
+      "package_version": "0.0.1",
+      "program": "rustc",
+      "target_kind": [
+        "lib"
+      ]
+    }
+  ]
+}
+"#]]
+            .is_json(),
         )
         .run();
 
@@ -574,6 +609,7 @@ fn metabuild_two_versions() {
                 [package]
                 name = "member1"
                 version = "0.0.1"
+                edition = "2015"
                 metabuild = ["mb"]
 
                 [build-dependencies]
@@ -588,6 +624,7 @@ fn metabuild_two_versions() {
                 [package]
                 name = "member2"
                 version = "0.0.1"
+                edition = "2015"
                 metabuild = ["mb"]
 
                 [build-dependencies]
@@ -602,6 +639,7 @@ fn metabuild_two_versions() {
             [package]
             name = "mb"
             version = "0.0.1"
+            edition = "2015"
         "#)
         .file(
             "src/lib.rs",
@@ -614,6 +652,7 @@ fn metabuild_two_versions() {
             [package]
             name = "mb"
             version = "0.0.2"
+            edition = "2015"
         "#)
         .file(
             "src/lib.rs",
@@ -623,8 +662,14 @@ fn metabuild_two_versions() {
 
     p.cargo("check -vv --workspace")
         .masquerade_as_nightly_cargo(&["metabuild"])
-        .with_stdout_contains("[member1 0.0.1] Hello mb1 [..]member1")
-        .with_stdout_contains("[member2 0.0.1] Hello mb2 [..]member2")
+        .with_stdout_data(
+            str![[r#"
+[member2 0.0.1] Hello mb2 [ROOT]/ws/member2
+[member1 0.0.1] Hello mb1 [ROOT]/ws/member1
+
+"#]]
+            .unordered(),
+        )
         .run();
 
     assert_eq!(
@@ -650,6 +695,7 @@ fn metabuild_external_dependency() {
                 [package]
                 name = "dep"
                 version = "1.0.0"
+                edition = "2015"
                 metabuild = ["mb"]
 
                 [build-dependencies]
@@ -667,6 +713,7 @@ fn metabuild_external_dependency() {
             [package]
             name = "foo"
             version = "0.0.1"
+            edition = "2015"
             [dependencies]
             dep = "1.0"
             "#,
@@ -676,7 +723,10 @@ fn metabuild_external_dependency() {
 
     p.cargo("check -vv")
         .masquerade_as_nightly_cargo(&["metabuild"])
-        .with_stdout_contains("[dep 1.0.0] Hello mb")
+        .with_stdout_data(str![[r#"
+[dep 1.0.0] Hello mb
+
+"#]])
         .run();
 
     assert_eq!(p.glob("target/.metabuild/metabuild-dep-*.rs").count(), 1);
@@ -687,43 +737,48 @@ fn metabuild_json_artifact() {
     let p = basic_project();
     p.cargo("check --message-format=json")
         .masquerade_as_nightly_cargo(&["metabuild"])
-        .with_json_contains_unordered(
-            r#"
-            {
-              "executable": null,
-              "features": [],
-              "filenames": "{...}",
-              "fresh": false,
-              "package_id": "foo [..]",
-              "manifest_path": "[..]",
-              "profile": "{...}",
-              "reason": "compiler-artifact",
-              "target": {
-                "crate_types": [
-                  "bin"
-                ],
-                "doc": false,
-                "doctest": false,
-                "edition": "2018",
-                "kind": [
-                  "custom-build"
-                ],
-                "name": "metabuild-foo",
-                "src_path": "[..]/foo/target/.metabuild/metabuild-foo-[..].rs",
-                "test": false
-              }
-            }
-
-            {
-              "cfgs": [],
-              "env": [],
-              "linked_libs": [],
-              "linked_paths": [],
-              "package_id": "foo [..]",
-              "out_dir": "[..]",
-              "reason": "build-script-executed"
-            }
-            "#,
+        .with_stdout_data(
+            str![[r#"
+[
+  "{...}",
+  {
+    "executable": null,
+    "features": [],
+    "filenames": "{...}",
+    "fresh": false,
+    "manifest_path": "[ROOT]/foo/Cargo.toml",
+    "package_id": "path+[ROOTURL]/foo#0.0.1",
+    "profile": "{...}",
+    "reason": "compiler-artifact",
+    "target": {
+      "crate_types": [
+        "bin"
+      ],
+      "doc": false,
+      "doctest": false,
+      "edition": "2018",
+      "kind": [
+        "custom-build"
+      ],
+      "name": "metabuild-foo",
+      "src_path": "[ROOT]/foo/target/.metabuild/metabuild-foo-[HASH].rs",
+      "test": false
+    }
+  },
+  {
+    "cfgs": [],
+    "env": [],
+    "linked_libs": [],
+    "linked_paths": [],
+    "out_dir": "[ROOT]/foo/target/debug/build/foo-[HASH]/out",
+    "package_id": "path+[ROOTURL]/foo#0.0.1",
+    "reason": "build-script-executed"
+  },
+  "{...}"
+]
+"#]]
+            .is_json()
+            .against_jsonlines(),
         )
         .run();
 }
@@ -736,36 +791,39 @@ fn metabuild_failed_build_json() {
     p.cargo("check --message-format=json")
         .masquerade_as_nightly_cargo(&["metabuild"])
         .with_status(101)
-        .with_json_contains_unordered(
-            r#"
-            {
-              "message": {
-                "children": "{...}",
-                "code": "{...}",
-                "level": "error",
-                "message": "cannot find function `metabuild` in [..] `mb`",
-                "rendered": "{...}",
-                "spans": "{...}"
-              },
-              "package_id": "foo [..]",
-              "manifest_path": "[..]",
-              "reason": "compiler-message",
-              "target": {
-                "crate_types": [
-                  "bin"
-                ],
-                "doc": false,
-                "doctest": false,
-                "edition": "2018",
-                "kind": [
-                  "custom-build"
-                ],
-                "name": "metabuild-foo",
-                "src_path": null,
-                "test": false
-              }
-            }
-            "#,
+        .with_stdout_data(
+            str![[r#"
+[
+  "{...}",
+  {
+    "manifest_path": "[ROOT]/foo/Cargo.toml",
+    "message": {
+      "level": "error",
+      "message": "cannot find function `metabuild` in crate `mb`",
+      "...": "{...}"
+    },
+    "package_id": "path+[ROOTURL]/foo#0.0.1",
+    "reason": "compiler-message",
+    "target": {
+      "crate_types": [
+        "bin"
+      ],
+      "doc": false,
+      "doctest": false,
+      "edition": "2018",
+      "kind": [
+        "custom-build"
+      ],
+      "name": "metabuild-foo",
+      "src_path": null,
+      "test": false
+    }
+  },
+  "{...}"
+]
+"#]]
+            .is_json()
+            .against_jsonlines(),
         )
         .run();
 }

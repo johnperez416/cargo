@@ -3,26 +3,27 @@
 //! [1]: https://doc.rust-lang.org/nightly/cargo/reference/registry-web-api.html#search
 
 use std::cmp;
-use std::iter::repeat;
 
 use anyhow::Context as _;
-use termcolor::Color;
-use termcolor::ColorSpec;
 use url::Url;
 
+use crate::util::style;
+use crate::util::style::LITERAL;
 use crate::util::truncate_with_ellipsis;
 use crate::CargoResult;
-use crate::Config;
+use crate::GlobalContext;
+
+use super::RegistryOrIndex;
 
 pub fn search(
     query: &str,
-    config: &Config,
-    index: Option<String>,
+    gctx: &GlobalContext,
+    reg_or_index: Option<RegistryOrIndex>,
     limit: u32,
-    reg: Option<String>,
 ) -> CargoResult<()> {
-    let (mut registry, source_ids) =
-        super::registry(config, None, index.as_deref(), reg.as_deref(), false, None)?;
+    let source_ids = super::get_source_id(gctx, reg_or_index.as_ref())?;
+    let (mut registry, _) =
+        super::registry(gctx, &source_ids, None, reg_or_index.as_ref(), false, None)?;
     let (crates, total_crates) = registry.search(query, limit).with_context(|| {
         format!(
             "failed to retrieve search results from the registry at {}",
@@ -35,7 +36,7 @@ pub fn search(
         .map(|krate| format!("{} = \"{}\"", krate.name, krate.max_version))
         .collect::<Vec<String>>();
 
-    let description_margin = names.iter().map(|s| s.len() + 4).max().unwrap_or_default();
+    let description_margin = names.iter().map(|s| s.len()).max().unwrap_or_default() + 4;
 
     let description_length = cmp::max(80, 128 - description_margin);
 
@@ -46,37 +47,31 @@ pub fn search(
             .map(|desc| truncate_with_ellipsis(&desc.replace("\n", " "), description_length))
     });
 
+    let mut shell = gctx.shell();
+    let stdout = shell.out();
+    let good = style::GOOD;
+
     for (name, description) in names.into_iter().zip(descriptions) {
         let line = match description {
-            Some(desc) => {
-                let space = repeat(' ')
-                    .take(description_margin - name.len())
-                    .collect::<String>();
-                name + &space + "# " + &desc
-            }
+            Some(desc) => format!("{name: <description_margin$}# {desc}"),
             None => name,
         };
         let mut fragments = line.split(query).peekable();
         while let Some(fragment) = fragments.next() {
-            let _ = config.shell().write_stdout(fragment, &ColorSpec::new());
+            let _ = write!(stdout, "{fragment}");
             if fragments.peek().is_some() {
-                let _ = config.shell().write_stdout(
-                    query,
-                    &ColorSpec::new().set_bold(true).set_fg(Some(Color::Green)),
-                );
+                let _ = write!(stdout, "{good}{query}{good:#}");
             }
         }
-        let _ = config.shell().write_stdout("\n", &ColorSpec::new());
+        let _ = writeln!(stdout);
     }
 
     let search_max_limit = 100;
     if total_crates > limit && limit < search_max_limit {
-        let _ = config.shell().write_stdout(
-            format_args!(
-                "... and {} crates more (use --limit N to see more)\n",
-                total_crates - limit
-            ),
-            &ColorSpec::new(),
+        let _ = writeln!(
+            stdout,
+            "... and {} crates more (use --limit N to see more)",
+            total_crates - limit
         );
     } else if total_crates > limit && limit >= search_max_limit {
         let extra = if source_ids.original.is_crates_io() {
@@ -85,10 +80,19 @@ pub fn search(
         } else {
             String::new()
         };
-        let _ = config.shell().write_stdout(
-            format_args!("... and {} crates more{}\n", total_crates - limit, extra),
-            &ColorSpec::new(),
+        let _ = writeln!(
+            stdout,
+            "... and {} crates more{}",
+            total_crates - limit,
+            extra
         );
+    }
+
+    if total_crates > 0 {
+        let literal = LITERAL;
+        shell.note(format_args!(
+            "to learn more about a package, run `{literal}cargo info <name>{literal:#}`",
+        ))?;
     }
 
     Ok(())

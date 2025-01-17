@@ -6,6 +6,7 @@ use std::net::TcpListener;
 use std::process::{Child, Stdio};
 use std::thread;
 
+use cargo_test_support::prelude::*;
 use cargo_test_support::{project, slow_cpu_multiplier};
 
 #[cargo_test]

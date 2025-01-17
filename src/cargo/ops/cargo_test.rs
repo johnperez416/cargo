@@ -1,9 +1,11 @@
-use crate::core::compiler::{Compilation, CompileKind, Doctest, Metadata, Unit, UnitOutput};
+use crate::core::compiler::{Compilation, CompileKind, Doctest, Unit, UnitHash, UnitOutput};
+use crate::core::profiles::PanicStrategy;
+use crate::core::shell::ColorChoice;
 use crate::core::shell::Verbosity;
 use crate::core::{TargetKind, Workspace};
 use crate::ops;
 use crate::util::errors::CargoResult;
-use crate::util::{add_path_args, CliError, CliResult, Config};
+use crate::util::{add_path_args, CliError, CliResult, GlobalContext};
 use anyhow::format_err;
 use cargo_util::{ProcessBuilder, ProcessError};
 use std::ffi::OsString;
@@ -116,8 +118,8 @@ fn run_unit_tests(
     compilation: &Compilation<'_>,
     test_kind: TestKind,
 ) -> Result<Vec<UnitTestError>, CliError> {
-    let config = ws.config();
-    let cwd = config.cwd();
+    let gctx = ws.gctx();
+    let cwd = gctx.cwd();
     let mut errors = Vec::new();
 
     for UnitOutput {
@@ -127,7 +129,7 @@ fn run_unit_tests(
     } in compilation.tests.iter()
     {
         let (exe_display, mut cmd) = cmd_builds(
-            config,
+            gctx,
             cwd,
             unit,
             path,
@@ -137,15 +139,13 @@ fn run_unit_tests(
             "unittests",
         )?;
 
-        if config.extra_verbose() {
+        if gctx.extra_verbose() {
             cmd.display_env_vars();
         }
 
-        config
-            .shell()
+        gctx.shell()
             .concise(|shell| shell.status("Running", &exe_display))?;
-        config
-            .shell()
+        gctx.shell()
             .verbose(|shell| shell.status("Running", &cmd))?;
 
         if let Err(e) = cmd.exec() {
@@ -174,9 +174,10 @@ fn run_doc_tests(
     test_args: &[&str],
     compilation: &Compilation<'_>,
 ) -> Result<Vec<UnitTestError>, CliError> {
-    let config = ws.config();
+    let gctx = ws.gctx();
     let mut errors = Vec::new();
-    let doctest_xcompile = config.cli_unstable().doctest_xcompile;
+    let doctest_xcompile = gctx.cli_unstable().doctest_xcompile;
+    let color = gctx.shell().color_choice();
 
     for doctest_info in &compilation.to_doc_test {
         let Doctest {
@@ -194,7 +195,7 @@ fn run_doc_tests(
                 CompileKind::Target(target) => {
                     if target.short_name() != compilation.host {
                         // Skip doctests, -Zdoctest-xcompile not enabled.
-                        config.shell().verbose(|shell| {
+                        gctx.shell().verbose(|shell| {
                             shell.note(format!(
                                 "skipping doctests for {} ({}), \
                                  cross-compilation doctests are not yet supported\n\
@@ -210,12 +211,20 @@ fn run_doc_tests(
             }
         }
 
-        config.shell().status("Doc-tests", unit.target.name())?;
+        gctx.shell().status("Doc-tests", unit.target.name())?;
         let mut p = compilation.rustdoc_process(unit, *script_meta)?;
 
         for (var, value) in env {
             p.env(var, value);
         }
+
+        let color_arg = match color {
+            ColorChoice::Always => "always",
+            ColorChoice::Never => "never",
+            ColorChoice::CargoAuto => "auto",
+        };
+        p.arg("--color").arg(color_arg);
+
         p.arg("--crate-name").arg(&unit.target.crate_name());
         p.arg("--test");
 
@@ -244,6 +253,10 @@ fn run_doc_tests(
             }
         }
 
+        if unit.profile.panic != PanicStrategy::Unwind {
+            p.arg("-C").arg(format!("panic={}", unit.profile.panic));
+        }
+
         for &rust_dep in &[
             &compilation.deps_output[&unit.kind],
             &compilation.deps_output[&CompileKind::Host],
@@ -261,7 +274,7 @@ fn run_doc_tests(
             p.arg("--test-args").arg(arg);
         }
 
-        if config.shell().verbosity() == Verbosity::Quiet {
+        if gctx.shell().verbosity() == Verbosity::Quiet {
             p.arg("--test-args").arg("--quiet");
         }
 
@@ -273,12 +286,11 @@ fn run_doc_tests(
             p.arg("-Zunstable-options");
         }
 
-        if config.extra_verbose() {
+        if gctx.extra_verbose() {
             p.display_env_vars();
         }
 
-        config
-            .shell()
+        gctx.shell()
             .verbose(|shell| shell.status("Running", p.to_string()))?;
 
         if let Err(e) = p.exec() {
@@ -306,8 +318,8 @@ fn display_no_run_information(
     compilation: &Compilation<'_>,
     exec_type: &str,
 ) -> CargoResult<()> {
-    let config = ws.config();
-    let cwd = config.cwd();
+    let gctx = ws.gctx();
+    let cwd = gctx.cwd();
     for UnitOutput {
         unit,
         path,
@@ -315,7 +327,7 @@ fn display_no_run_information(
     } in compilation.tests.iter()
     {
         let (exe_display, cmd) = cmd_builds(
-            config,
+            gctx,
             cwd,
             unit,
             path,
@@ -324,11 +336,9 @@ fn display_no_run_information(
             compilation,
             exec_type,
         )?;
-        config
-            .shell()
+        gctx.shell()
             .concise(|shell| shell.status("Executable", &exe_display))?;
-        config
-            .shell()
+        gctx.shell()
             .verbose(|shell| shell.status("Executable", &cmd))?;
     }
 
@@ -341,11 +351,11 @@ fn display_no_run_information(
 /// to display that describes the executable path in a human-readable form.
 /// `process` is the `ProcessBuilder` to use for executing the test.
 fn cmd_builds(
-    config: &Config,
+    gctx: &GlobalContext,
     cwd: &Path,
     unit: &Unit,
     path: &PathBuf,
-    script_meta: &Option<Metadata>,
+    script_meta: &Option<UnitHash>,
     test_args: &[&str],
     compilation: &Compilation<'_>,
     exec_type: &str,
@@ -372,7 +382,7 @@ fn cmd_builds(
 
     let mut cmd = compilation.target_process(path, unit.kind, &unit.pkg, *script_meta)?;
     cmd.args(test_args);
-    if unit.target.harness() && config.shell().verbosity() == Verbosity::Quiet {
+    if unit.target.harness() && gctx.shell().verbosity() == Verbosity::Quiet {
         cmd.arg("--quiet");
     }
 
@@ -442,13 +452,13 @@ fn report_test_error(
         err = test_error.context(err);
     }
 
-    crate::display_error(&err, &mut ws.config().shell());
+    crate::display_error(&err, &mut ws.gctx().shell());
 
     let harness: bool = unit_err.unit.target.harness();
     let nocapture: bool = test_args.contains(&"--nocapture");
 
     if !is_simple && executed && harness && !nocapture {
-        drop(ws.config().shell().note(
+        drop(ws.gctx().shell().note(
             "test exited abnormally; to see the full output pass --nocapture to the harness.",
         ));
     }

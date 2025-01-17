@@ -1,4 +1,4 @@
-## Unstable Features
+# Unstable Features
 
 Experimental Cargo features are only available on the [nightly channel]. You
 are encouraged to experiment with these features to see if they meet your
@@ -28,9 +28,9 @@ how the feature works:
 
 * New command-line flags, options, and subcommands require the `-Z
   unstable-options` CLI option to also be included. For example, the new
-  `--out-dir` option is only available on nightly:
+  `--artifact-dir` option is only available on nightly:
 
-  ```cargo +nightly build --out-dir=out -Z unstable-options```
+  ```cargo +nightly build --artifact-dir=out -Z unstable-options```
 
 * `-Z` command-line flags are used to enable new functionality that may not
   have an interface, or the interface has not yet been designed, or for more
@@ -52,14 +52,15 @@ how the feature works:
   ```
 
 Each new feature described below should explain how to use it.
-For the latest nightly, see the [nightly version] of this page.
+
+*For the latest nightly, see the [nightly version] of this page.*
 
 [config file]: config.md
 [nightly channel]: ../../book/appendix-07-nightly-rust.html
 [stabilized]: https://doc.crates.io/contrib/process/unstable.html#stabilization
-[nightly version]: https://doc.rust-lang.org/nightly/cargo/reference/unstable.html#script
+[nightly version]: https://doc.rust-lang.org/nightly/cargo/reference/unstable.html
 
-### List of unstable features
+## List of unstable features
 
 * Unstable-specific features
     * [-Z allow-features](#allow-features) --- Provides a way to restrict which unstable features are used.
@@ -72,28 +73,36 @@ For the latest nightly, see the [nightly version] of this page.
     * [direct-minimal-versions](#direct-minimal-versions) — Forces the resolver to use the lowest compatible version instead of the highest.
     * [public-dependency](#public-dependency) --- Allows dependencies to be classified as either public or private.
     * [msrv-policy](#msrv-policy) --- MSRV-aware resolver and version selection
+    * [precise-pre-release](#precise-pre-release) --- Allows pre-release versions to be selected with `update --precise`
+    * [update-breaking](#update-breaking) --- Allows upgrading to breaking versions with `update --breaking`
 * Output behavior
-    * [out-dir](#out-dir) --- Adds a directory where artifacts are copied to.
+    * [artifact-dir](#artifact-dir) --- Adds a directory where artifacts are copied to.
     * [Different binary name](#different-binary-name) --- Assign a name to the built binary that is separate from the crate name.
+    * [root-dir](#root-dir) --- Controls the root directory relative to which paths are printed
 * Compile behavior
     * [mtime-on-use](#mtime-on-use) --- Updates the last-modified timestamp on every dependency every time it is used, to provide a mechanism to delete unused artifacts.
     * [doctest-xcompile](#doctest-xcompile) --- Supports running doctests with the `--target` flag.
     * [build-std](#build-std) --- Builds the standard library instead of using pre-built binaries.
     * [build-std-features](#build-std-features) --- Sets features to use with the standard library.
     * [binary-dep-depinfo](#binary-dep-depinfo) --- Causes the dep-info file to track binary dependencies.
+    * [checksum-freshness](#checksum-freshness) --- When passed, the decision as to whether a crate needs to be rebuilt is made using file checksums instead of the file mtime.
     * [panic-abort-tests](#panic-abort-tests) --- Allows running tests with the "abort" panic strategy.
-    * [check-cfg](#check-cfg) --- Compile-time validation of `cfg` expressions.
     * [host-config](#host-config) --- Allows setting `[target]`-like configuration settings for host build targets.
     * [target-applies-to-host](#target-applies-to-host) --- Alters whether certain flags will be passed to host build targets.
+    * [gc](#gc) --- Global cache garbage collection.
+    * [open-namespaces](#open-namespaces) --- Allow multiple packages to participate in the same API namespace
 * rustdoc
     * [rustdoc-map](#rustdoc-map) --- Provides mappings for documentation to link to external sites like [docs.rs](https://docs.rs/).
     * [scrape-examples](#scrape-examples) --- Shows examples within documentation.
+    * [output-format](#output-format-for-rustdoc) --- Allows documentation to also be emitted in the experimental [JSON format](https://doc.rust-lang.org/nightly/nightly-rustc/rustdoc_json_types/).
 * `Cargo.toml` extensions
     * [Profile `rustflags` option](#profile-rustflags-option) --- Passed directly to rustc.
     * [codegen-backend](#codegen-backend) --- Select the codegen backend used by rustc.
     * [per-package-target](#per-package-target) --- Sets the `--target` to use for each individual package.
     * [artifact dependencies](#artifact-dependencies) --- Allow build artifacts to be included into other build artifacts and build them for different targets.
-    * [`[lints]`](#lints) --- Configure lint levels for various linter tools.
+    * [Profile `trim-paths` option](#profile-trim-paths-option) --- Control the sanitization of file paths in build outputs.
+    * [`[lints.cargo]`](#lintscargo) --- Allows configuring lints for Cargo.
+    * [path bases](#path-bases) --- Named base directories for path dependencies.
 * Information and metadata
     * [Build-plan](#build-plan) --- Emits JSON information on which commands will be run.
     * [unit-graph](#unit-graph) --- Emits JSON for Cargo's internal graph structure.
@@ -102,14 +111,17 @@ For the latest nightly, see the [nightly version] of this page.
     * [config-include](#config-include) --- Adds the ability for config files to include other files.
     * [`cargo config`](#cargo-config) --- Adds a new subcommand for viewing config files.
 * Registries
-    * [credential-process](#credential-process) --- Adds support for fetching registry tokens from an external authentication program.
     * [publish-timeout](#publish-timeout) --- Controls the timeout between uploading the crate and being available in the index
-    * [registry-auth](#registry-auth) --- Adds support for authenticated registries, and generate registry authentication tokens using asymmetric cryptography.
+    * [asymmetric-token](#asymmetric-token) --- Adds support for authentication tokens using asymmetric cryptography (`cargo:paseto` provider).
 * Other
     * [gitoxide](#gitoxide) --- Use `gitoxide` instead of `git2` for a set of operations.
     * [script](#script) --- Enable support for single-file `.rs` packages.
+    * [lockfile-path](#lockfile-path) --- Allows to specify a path to lockfile other than the default path `<workspace_root>/Cargo.lock`.
+    * [package-workspace](#package-workspace) --- Allows for packaging and publishing multiple crates in a workspace.
+    * [native-completions](#native-completions) --- Move cargo shell completions to native completions.
+    * [warnings](#warnings) --- controls warning behavior; options for allowing or denying warnings.
 
-### allow-features
+## allow-features
 
 This permanently-unstable flag makes it so that only a listed set of
 unstable features can be used. Specifically, if you pass
@@ -135,7 +147,7 @@ to any Rust tools that cargo ends up calling (like `rustc` or
 `rustdoc`). Thus, if you run `cargo -Zallow-features=`, no unstable
 Cargo _or_ Rust features can be used.
 
-### no-index-update
+## no-index-update
 * Original Issue: [#3479](https://github.com/rust-lang/cargo/issues/3479)
 * Tracking Issue: [#7404](https://github.com/rust-lang/cargo/issues/7404)
 
@@ -144,7 +156,7 @@ the registry index. This is intended for tools such as Crater that issue many
 Cargo commands, and you want to avoid the network latency for updating the
 index each time.
 
-### mtime-on-use
+## mtime-on-use
 * Original Issue: [#6477](https://github.com/rust-lang/cargo/pull/6477)
 * Cache usage meta tracking issue: [#7150](https://github.com/rust-lang/cargo/issues/7150)
 
@@ -155,7 +167,7 @@ To make this more practical setting the `unstable.mtime_on_use` flag in `.cargo/
 or the corresponding ENV variable will apply the `-Z mtime-on-use` to all
 invocations of nightly cargo. (the config flag is ignored by stable)
 
-### avoid-dev-deps
+## avoid-dev-deps
 * Original Issue: [#4988](https://github.com/rust-lang/cargo/issues/4988)
 * Tracking Issue: [#5133](https://github.com/rust-lang/cargo/issues/5133)
 
@@ -165,7 +177,7 @@ used. The `-Z avoid-dev-deps` flag allows Cargo to avoid downloading
 dev-dependencies if they are not needed. The `Cargo.lock` file will not be
 generated if dev-dependencies are skipped.
 
-### minimal-versions
+## minimal-versions
 * Original Issue: [#4100](https://github.com/rust-lang/cargo/issues/4100)
 * Tracking Issue: [#5657](https://github.com/rust-lang/cargo/issues/5657)
 
@@ -185,7 +197,7 @@ minimum versions that you are actually using. That is, if Cargo.toml says
 `foo = "1.0.0"` that you don't accidentally depend on features added only in
 `foo 1.5.0`.
 
-### direct-minimal-versions
+## direct-minimal-versions
 * Original Issue: [#4100](https://github.com/rust-lang/cargo/issues/4100)
 * Tracking Issue: [#5657](https://github.com/rust-lang/cargo/issues/5657)
 
@@ -202,30 +214,37 @@ minimum versions that you are actually using. That is, if Cargo.toml says
 Indirect dependencies are resolved as normal so as not to be blocked on their
 minimal version validation.
 
-### out-dir
+## artifact-dir
 * Original Issue: [#4875](https://github.com/rust-lang/cargo/issues/4875)
 * Tracking Issue: [#6790](https://github.com/rust-lang/cargo/issues/6790)
 
-This feature allows you to specify the directory where artifacts will be
-copied to after they are built. Typically artifacts are only written to the
-`target/release` or `target/debug` directories. However, determining the
-exact filename can be tricky since you need to parse JSON output. The
-`--out-dir` flag makes it easier to predictably access the artifacts. Note
-that the artifacts are copied, so the originals are still in the `target`
-directory. Example:
+This feature allows you to specify the directory where artifacts will be copied
+to after they are built. Typically artifacts are only written to the
+`target/release` or `target/debug` directories. However, determining the exact
+filename can be tricky since you need to parse JSON output. The `--artifact-dir`
+flag makes it easier to predictably access the artifacts. Note that the
+artifacts are copied, so the originals are still in the `target` directory.
+Example:
 
 ```sh
-cargo +nightly build --out-dir=out -Z unstable-options
+cargo +nightly build --artifact-dir=out -Z unstable-options
 ```
 
 This can also be specified in `.cargo/config.toml` files.
 
 ```toml
 [build]
-out-dir = "out"
+artifact-dir = "out"
 ```
 
-### doctest-xcompile
+## root-dir
+* Original Issue: [#9887](https://github.com/rust-lang/cargo/issues/9887)
+* Tracking Issue: None (not currently slated for stabilization)
+
+The `-Zroot-dir` flag sets the root directory relative to which paths are printed.
+This affects both diagnostics and paths emitted by the `file!()` macro.
+
+## doctest-xcompile
 * Tracking Issue: [#7040](https://github.com/rust-lang/cargo/issues/7040)
 * Tracking Rustc Issue: [#64245](https://github.com/rust-lang/rust/issues/64245)
 
@@ -241,8 +260,15 @@ information from `.cargo/config.toml`. See the rustc issue for more information.
 cargo test --target foo -Zdoctest-xcompile
 ```
 
-### Build-plan
+## Build-plan
 * Tracking Issue: [#5579](https://github.com/rust-lang/cargo/issues/5579)
+
+<div class="warning">
+
+> The build-plan feature is deprecated and may be removed in a future version.
+> See <https://github.com/rust-lang/cargo/issues/7614>.
+
+</div>
 
 The `--build-plan` argument for the `build` command will output JSON with
 information about which commands would be run without actually executing
@@ -253,7 +279,7 @@ Example:
 cargo +nightly build --build-plan -Z unstable-options
 ```
 
-### Metabuild
+## Metabuild
 * Tracking Issue: [rust-lang/rust#49803](https://github.com/rust-lang/rust/issues/49803)
 * RFC: [#2196](https://github.com/rust-lang/rfcs/blob/master/text/2196-metabuild.md)
 
@@ -286,14 +312,28 @@ extra-info = "qwerty"
 Metabuild packages should have a public function called `metabuild` that
 performs the same actions as a regular `build.rs` script would perform.
 
-### public-dependency
+## public-dependency
 * Tracking Issue: [#44663](https://github.com/rust-lang/rust/issues/44663)
 
 The 'public-dependency' feature allows marking dependencies as 'public'
 or 'private'. When this feature is enabled, additional information is passed to rustc to allow
-the 'exported_private_dependencies' lint to function properly.
+the [exported_private_dependencies](../../rustc/lints/listing/warn-by-default.html#exported-private-dependencies) lint to function properly.
 
-This requires the appropriate key to be set in `cargo-features`:
+To enable this feature, you can either use `-Zpublic-dependency`
+
+```sh
+cargo +nightly run -Zpublic-dependency
+```
+
+or `[unstable]` table, for example,
+
+```toml
+# .cargo/config.toml
+[unstable]
+public-dependency = true
+```
+
+`public-dependency` could also be enabled in `cargo-features`, **though this is deprecated and will be removed soon**.
 
 ```toml
 cargo-features = ["public-dependency"]
@@ -303,15 +343,84 @@ my_dep = { version = "1.2.3", public = true }
 private_dep = "2.0.0" # Will be 'private' by default
 ```
 
-### msrv-policy
+Documentation updates:
+- For workspace's "The `dependencies` table" section, include `public` as an unsupported field for `workspace.dependencies`
+
+## msrv-policy
+- [RFC: MSRV-aware Resolver](https://rust-lang.github.io/rfcs/3537-msrv-resolver.html)
 - [#9930](https://github.com/rust-lang/cargo/issues/9930) (MSRV-aware resolver)
-- [#10653](https://github.com/rust-lang/cargo/issues/10653) (MSRV-aware cargo-add)
-- [#10903](https://github.com/rust-lang/cargo/issues/10903) (MSRV-aware cargo-install)
 
-The `msrv-policy` feature enables experiments in MSRV-aware policy for cargo in
-preparation for an upcoming RFC.
+Catch-all unstable feature for MSRV-aware cargo features under
+[RFC 2495](https://github.com/rust-lang/rfcs/pull/2495).
 
-### build-std
+### MSRV-aware cargo add
+
+This was stabilized in 1.79 in [#13608](https://github.com/rust-lang/cargo/pull/13608).
+
+### MSRV-aware resolver
+
+This was stabilized in 1.84 in [#14639](https://github.com/rust-lang/cargo/pull/14639).
+
+### Convert `incompatible_toolchain` error into a lint
+
+Unimplemented
+
+### `--update-rust-version` flag for `cargo add`, `cargo update`
+
+Unimplemented
+
+### `package.rust-version = "toolchain"`
+
+Unimplemented
+
+### Update `cargo new` template to set `package.rust-version = "toolchain"`
+
+Unimplemented
+
+## precise-pre-release
+
+* Tracking Issue: [#13290](https://github.com/rust-lang/cargo/issues/13290)
+* RFC: [#3493](https://github.com/rust-lang/rfcs/pull/3493)
+
+The `precise-pre-release` feature allows pre-release versions to be selected with `update --precise`
+even when a pre-release is not specified by a projects `Cargo.toml`.
+
+Take for example this `Cargo.toml`.
+
+```toml
+[dependencies]
+my-dependency = "0.1.1"
+```
+
+It's possible to update `my-dependency` to a pre-release with `update -Zunstable-options my-dependency --precise 0.1.2-pre.0`.
+This is because `0.1.2-pre.0` is considered compatible with `0.1.1`.
+It would not be possible to upgrade to `0.2.0-pre.0` from `0.1.1` in the same way.
+
+## update-breaking
+
+* Tracking Issue: [#12425](https://github.com/rust-lang/cargo/issues/12425)
+
+Allow upgrading dependencies version requirements in `Cargo.toml` across SemVer
+incompatible versions using with the `--breaking` flag.
+
+This only applies to dependencies when
+- The package is a dependency of a workspace member
+- The dependency is not renamed
+- A SemVer-incompatible version is available
+- The "SemVer operator" is used (`^` which is the default)
+
+Users may further restrict which packages get upgraded by specifying them on
+the command line.
+
+Example:
+```console
+$ cargo +nightly -Zunstable-options update --breaking
+$ cargo +nightly -Zunstable-options update --breaking clap
+```
+
+*This is meant to fill a similar role as [cargo-upgrade](https://github.com/killercup/cargo-edit/)*
+
+## build-std
 * Tracking Repository: <https://github.com/rust-lang/wg-cargo-std-aware>
 
 The `build-std` feature enables Cargo to compile the standard library itself as
@@ -333,10 +442,6 @@ component:
 ```console
 $ rustup component add rust-src --toolchain nightly
 ```
-
-It is also required today that the `-Z build-std` flag is combined with the
-`--target` flag. Note that you're not forced to do a cross compilation, you're
-just forced to pass `--target` in one form or another.
 
 Usage looks like:
 
@@ -366,16 +471,15 @@ $ cargo +nightly build -Z build-std=core,alloc
 
 The value here is a comma-separated list of standard library crates to build.
 
-#### Requirements
+### Requirements
 
 As a summary, a list of requirements today to use `-Z build-std` are:
 
 * You must install libstd's source code through `rustup component add rust-src`
-* You must pass `--target`
 * You must use both a nightly Cargo and a nightly rustc
 * The `-Z build-std` flag must be passed to all `cargo` invocations.
 
-#### Reporting bugs and helping out
+### Reporting bugs and helping out
 
 The `-Z build-std` feature is in the very early stages of development! This
 feature for Cargo has an extremely long history and is very large in scope, and
@@ -392,7 +496,7 @@ something doesn't quite work the way you'd like it to, feel free to check out
 the [issue tracker](https://github.com/rust-lang/wg-cargo-std-aware/issues) of
 the tracking repository, and if it's not there please file a new issue!
 
-### build-std-features
+## build-std-features
 * Tracking Repository: <https://github.com/rust-lang/wg-cargo-std-aware>
 
 This flag is a sibling to the `-Zbuild-std` feature flag. This will configure
@@ -401,7 +505,7 @@ library. The default enabled features, at this time, are `backtrace` and
 `panic-unwind`. This flag expects a comma-separated list and, if provided, will
 override the default list of features enabled.
 
-### binary-dep-depinfo
+## binary-dep-depinfo
 * Tracking rustc issue: [#63012](https://github.com/rust-lang/rust/issues/63012)
 
 The `-Z binary-dep-depinfo` flag causes Cargo to forward the same flag to
@@ -412,7 +516,18 @@ the crate will be rebuilt). The primary use case is for building the compiler
 itself, which has implicit dependencies on the standard library that would
 otherwise be untracked for change-detection.
 
-### panic-abort-tests
+## checksum-freshness
+* Tracking issue: [#14136](https://github.com/rust-lang/cargo/issues/14136)
+
+The `-Z checksum-freshness` flag will replace the use of file mtimes in cargo's
+fingerprints with a file checksum value. This is most useful on systems with a poor
+mtime implementation, or in CI/CD. The checksum algorithm can change without notice
+between cargo versions. Fingerprints are used by cargo to determine when a crate needs to be rebuilt.
+
+For the time being files ingested by build script will continue to use mtimes, even when `checksum-freshness`
+is enabled. This is not intended as a long term solution.
+
+## panic-abort-tests
 * Tracking Issue: [#67650](https://github.com/rust-lang/rust/issues/67650)
 * Original Pull Request: [#7460](https://github.com/rust-lang/cargo/pull/7460)
 
@@ -428,7 +543,7 @@ like to stabilize it somehow!
 
 [rust-lang/rust#64158]: https://github.com/rust-lang/rust/pull/64158
 
-### config-include
+## config-include
 * Tracking Issue: [#7723](https://github.com/rust-lang/cargo/issues/7723)
 
 This feature requires the `-Zconfig-include` command-line option.
@@ -456,7 +571,7 @@ different. When a config file contains an `include` key:
 2. Then, the config file's own values are merged on top of the config
    from the `include` path.
 
-### target-applies-to-host
+## target-applies-to-host
 * Original Pull Request: [#9322](https://github.com/rust-lang/cargo/pull/9322)
 * Tracking Issue: [#9453](https://github.com/rust-lang/cargo/issues/9453)
 
@@ -498,11 +613,11 @@ target-applies-to-host = false
 cargo +nightly -Ztarget-applies-to-host build --target x86_64-unknown-linux-gnu
 ```
 
-### host-config
+## host-config
 * Original Pull Request: [#9322](https://github.com/rust-lang/cargo/pull/9322)
 * Tracking Issue: [#9452](https://github.com/rust-lang/cargo/issues/9452)
 
-The `host` key in a config file can be used pass flags to host build targets
+The `host` key in a config file can be used to pass flags to host build targets
 such as build scripts that must run on the host system instead of the target
 system when cross compiling. It supports both generic and host arch specific
 tables. Matching host arch tables take precedence over generic host tables.
@@ -522,7 +637,7 @@ rustflags = ["-Clink-arg=--verbose"]
 linker = "/path/to/target/linker"
 ```
 
-The generic `host` table above will be entirely ignored when building on a
+The generic `host` table above will be entirely ignored when building on an
 `x86_64-unknown-linux-gnu` host as the `host.x86_64-unknown-linux-gnu` table
 takes precedence.
 
@@ -533,7 +648,7 @@ Setting `-Zhost-config` changes the default for `target-applies-to-host` to
 cargo +nightly -Ztarget-applies-to-host -Zhost-config build --target x86_64-unknown-linux-gnu
 ```
 
-### unit-graph
+## unit-graph
 * Tracking Issue: [#8002](https://github.com/rust-lang/cargo/issues/8002)
 
 The `--unit-graph` flag can be passed to any build command (`build`, `check`,
@@ -578,7 +693,7 @@ The following is a description of the JSON structure:
       "target": {
         "kind": ["lib"],
         "crate_types": ["lib"],
-        "name": "my-package",
+        "name": "my_package",
         "src_path": "/path/to/my-package/src/lib.rs",
         "edition": "2018",
         "test": true,
@@ -667,7 +782,7 @@ The following is a description of the JSON structure:
 }
 ```
 
-### Profile `rustflags` option
+## Profile `rustflags` option
 * Original Issue: [rust-lang/cargo#7878](https://github.com/rust-lang/cargo/issues/7878)
 * Tracking Issue: [rust-lang/cargo#10271](https://github.com/rust-lang/cargo/issues/10271)
 
@@ -697,7 +812,7 @@ profile-rustflags = true
 rustflags = [ "-C", "..." ]
 ```
 
-### rustdoc-map
+## rustdoc-map
 * Tracking Issue: [#8296](https://github.com/rust-lang/cargo/issues/8296)
 
 This feature adds configuration settings that are passed to `rustdoc` so that
@@ -738,7 +853,7 @@ The default value is `"remote"`.
 
 The value may also take a URL for a custom location.
 
-### per-package-target
+## per-package-target
 * Tracking Issue: [#9406](https://github.com/rust-lang/cargo/pull/9406)
 * Original Pull Request: [#9030](https://github.com/rust-lang/cargo/pull/9030)
 * Original Issue: [#7004](https://github.com/rust-lang/cargo/pull/7004)
@@ -761,7 +876,7 @@ In this example, the crate is always built for
 as a plugin for a main program that runs on the host (or provided on
 the command line) target.
 
-### artifact-dependencies
+## artifact-dependencies
 
 * Tracking Issue: [#9096](https://github.com/rust-lang/cargo/pull/9096)
 * Original Pull Request: [#9992](https://github.com/rust-lang/cargo/pull/9992)
@@ -771,7 +886,7 @@ and use the artifacts built by those crates at compile time.
 
 Run `cargo` with `-Z bindeps` to enable this functionality.
 
-#### artifact-dependencies: Dependency declarations
+### artifact-dependencies: Dependency declarations
 
 Artifact-dependencies adds the following keys to a dependency declaration in `Cargo.toml`:
 
@@ -823,7 +938,7 @@ Artifact-dependencies adds the following keys to a dependency declaration in `Ca
   same-target = { version = "1.0", artifact = "bin", target = "target" }
   ```
 
-#### artifact-dependencies: Environment variables
+### artifact-dependencies: Environment variables
 
 After building an artifact dependency, Cargo provides the following environment variables that you can use to access the artifact:
 
@@ -852,9 +967,9 @@ For each kind of dependency, these variables are supplied to the same part of th
 
 [`env!`]: https://doc.rust-lang.org/std/macro.env.html
 
-#### artifact-dependencies: Examples
+### artifact-dependencies: Examples
 
-##### Example: use a binary executable from a build script
+#### Example: use a binary executable from a build script
 
 In the `Cargo.toml` file, you can specify a dependency on a binary to make available for a build script:
 
@@ -879,7 +994,7 @@ fn main() {
 }
 ```
 
-##### Example: use _cdylib_ artifact in build script
+#### Example: use _cdylib_ artifact in build script
 
 The `Cargo.toml` in the consuming package, building the `bar` library as `cdylib`
 for a specific build target…
@@ -897,7 +1012,7 @@ fn main() {
 }
 ```
 
-##### Example: use _binary_ artifact and its library in a binary
+#### Example: use _binary_ artifact and its library in a binary
 
 The `Cargo.toml` in the consuming package, building the `bar` binary for inclusion
 as artifact while making it available as library as well…
@@ -916,7 +1031,7 @@ fn main() {
 }
 ```
 
-### publish-timeout
+## publish-timeout
 * Tracking Issue: [11222](https://github.com/rust-lang/cargo/issues/11222)
 
 The `publish.timeout` key in a config file can be used to control how long
@@ -934,35 +1049,11 @@ It requires the `-Zpublish-timeout` command-line options to be set.
 timeout = 300  # in seconds
 ```
 
-### registry-auth
-* Tracking Issue: [10474](https://github.com/rust-lang/cargo/issues/10474)
-* RFC: [#3139](https://github.com/rust-lang/rfcs/pull/3139)
-
-Enables Cargo to include the authorization token for API requests, crate downloads
-and sparse index updates by adding a configuration option to config.json
-in the registry index.
-
-To use this feature, the registry server must include `"auth-required": true` in
-`config.json`, and you must pass the `-Z registry-auth` flag on the Cargo command line.
-
-When using the sparse protocol, Cargo will attempt to fetch the `config.json` file before
-fetching any other files. If the server responds with an HTTP 401, then Cargo will assume
-that the registry requires authentication and re-attempt the request for `config.json`
-with the authentication token included.
-
-On authentication failure (or missing authentication token) the server MAY include a
-`WWW-Authenticate` header with a `Cargo login_url` challenge to indicate where the user
-can go to get a token.
-
-```
-WWW-Authenticate: Cargo login_url="https://test-registry-login/me
-```
-
-### asymmetric-token
+## asymmetric-token
 * Tracking Issue: [10519](https://github.com/rust-lang/cargo/issues/10519)
 * RFC: [#3231](https://github.com/rust-lang/rfcs/pull/3231)
 
-Add support for Cargo to authenticate the user to registries without sending secrets over the network.
+The `-Z asymmetric-token` flag enables the `cargo:paseto` credential provider which allows Cargo to authenticate to registries without sending secrets over the network.
 
 In [`config.toml`](config.md) and `credentials.toml` files there is a field called `private-key`, which is a private key formatted in the secret [subset of `PASERK`](https://github.com/paseto-standard/paserk/blob/master/types/secret.md) and is used to sign asymmetric tokens
 
@@ -998,266 +1089,7 @@ The "footer" (which is part of the signature) will be a JSON string in UTF-8 and
 PASETO includes the message that was signed, so the server does not have to reconstruct the exact string from the request in order to check the signature. The server does need to check that the signature is valid for the string in the PASETO and that the contents of that string matches the request.
 If a claim should be expected for the request but is missing in the PASETO then the request must be rejected.
 
-### credential-process
-* Tracking Issue: [#8933](https://github.com/rust-lang/cargo/issues/8933)
-* RFC: [#2730](https://github.com/rust-lang/rfcs/pull/2730)
-
-The `credential-process` feature adds a config setting to fetch registry
-authentication tokens by calling an external process.
-
-To use this feature, you must pass the `-Z credential-process` flag on the
-command-line.
-
-#### `credential-process` Configuration
-
-To configure which process to run to fetch the token, specify the process in
-the `registry` table in a [config file] with spaces separating arguments. If the
-path to the provider or its arguments contain spaces, then it mused be defined in
-the `credential-alias` table and referenced instead.
-
-```toml
-[registry]
-global-credential-providers = ["/usr/bin/cargo-creds"]
-```
-
-The provider at the end of the list will be attempted first. This ensures
-that when config files are merged, files closer to the project (and ultimatly
-environment variables) have precedence.
-
-In this example, the `my-provider` provider will be attempted first, and if
-it cannot provide credentials, then the `cargo:token` provider will be used.
-
-```toml
-[registry]
-global-credential-providers = ['cargo:token', 'my-provider']
-```
-
-If you want to use a different provider for a specific registry, it can be
-specified in the `registries` table:
-
-```toml
-[registries.my-registry]
-credential-provider = "/usr/bin/cargo-creds"
-```
-
-The credential provider for crates.io can be specified as:
-
-```toml
-[registry]
-credential-provider = "/usr/bin/cargo-creds"
-```
-
-The value can be a string with spaces separating arguments or it can be a TOML
-array of strings.
-
-For commonly-used providers, or providers that need to contain spaces in the arguments
-or path, the `credential-alias` table can be used. These aliases can be referenced
-in `credential-provider` or `global-credential-providers`.
-
-```toml
-[credential-alias]
-my-alias = ["/usr/bin/cargo-creds", "--argument"]
-
-[registry]
-global-credential-providers = ["cargo:token", "my-alias"]
-```
-
-#### Built-in providers
-
-Cargo now includes several built-in credential providers. These providers are
-executed within the Cargo process. They are identified with the `cargo:` prefix.
-
-* `cargo:token` - Uses Cargo's config and `credentials.toml` to store the token (default).
-* `cargo:wincred` - Uses the Windows Credential Manager to store the token.
-* `cargo:macos-keychain` - Uses the macOS Keychain to store the token.
-* `cargo:libsecret` - Uses [libsecret](https://wiki.gnome.org/Projects/Libsecret) to store tokens on Linux systems.
-* `cargo:token-from-stdout <command>` - Launch a subprocess that returns a token
-  on stdout. Newlines will be trimmed. The process inherits the user's stdin and stderr.
-  It should exit 0 on success, and nonzero on error.
-  
-  With this form, [`cargo login`] and [`cargo logout`] are not supported and
-  return an error if used.
-  
-  The following environment variables will be provided to the executed command:
-  
-  * `CARGO` --- Path to the `cargo` binary executing the command.
-  * `CARGO_REGISTRY_INDEX_URL` --- The URL of the registry index.
-  * `CARGO_REGISTRY_NAME_OPT` --- Optional name of the registry. Should not be used as a storage key. Not always available.
-
-* `cargo:paseto` - implements asymmetric token support (RFC3231) as a credential provider. Requires `-Zasymmetric-token`.
-
-
-`cargo-credential-1password` uses the 1password `op` CLI to store the token. You must
-install the `op` CLI from the [1password
-website](https://1password.com/downloads/command-line/). You must run `op
-signin` at least once with the appropriate arguments (such as `op signin
-my.1password.com user@example.com`), unless you provide the sign-in-address
-and email arguments. The master password will be required on each request
-unless the appropriate `OP_SESSION` environment variable is set. It supports
-the following command-line arguments:
-* `--account`: The account shorthand name to use.
-* `--vault`: The vault name to use.
-* `--sign-in-address`: The sign-in-address, which is a web address such as `my.1password.com`.
-* `--email`: The email address to sign in with.
-
-Install the provider with `cargo install cargo-credential-1password`
-In the config, add it to `global-credential-providers`:
-```toml
-[registry]
-global-credential-providers = ["cargo-credential-1password"]
-```
-
-#### JSON Interface
-When using an external credential provider, Cargo communicates with the credential
-provider using stdin/stdout messages passed as a single line of JSON.
-
-Cargo will always execute the credential provider with the `--cargo-plugin` argument.
-This enables a credential provider executable to have additional functionality beyond
-how Cargo uses it.
-
-The messages here have additional newlines added for readability.
-Actual messages must not contain newlines.
-
-##### Credential hello
-* Sent by: credential provider
-* Purpose: used to identify the supported protocols on process startup
-```javascript
-{
-    "v":[1]
-}
-```
-
-##### Login request
-* Sent by: Cargo
-* Purpose: collect and store credentials
-```javascript
-{
-    // Protocol version
-    "v":1,
-    // Action to perform: login
-    "kind":"login",
-    // Registry information
-    "registry":{"index-url":"sparse+https://registry-url/index/", "name": "my-registry"},
-}
-```
-
-##### Read request
-* Sent by: Cargo
-* Purpose: Get the credential for reading crate information
-```javascript
-{
-    // Protocol version
-    "v":1,
-    // Request kind: get credentials
-    "kind":"get",
-    // Action to perform: read crate information
-    "operation":"read",
-    // Registry information
-    "registry":{"index-url":"sparse+https://registry-url/index/", "name": "my-registry"},
-    // Additional command-line args
-    "args":[]
-}
-```
-
-##### Publish request
-* Sent by: Cargo
-* Purpose: Get the credential for publishing a crate
-```javascript
-{
-    // Protocol version
-    "v":1,
-    // Request kind: get credentials
-    "kind":"get",
-    // Action to perform: publish crate
-    "operation":"publish",
-    // Crate name
-    "name":"sample",
-    // Crate version
-    "vers":"0.1.0",
-    // Crate checksum
-    "cksum":"...",
-    // Registry information
-    "registry":{"index-url":"sparse+https://registry-url/index/", "name": "my-registry"},
-    // Additional command-line args
-    "args":[]
-}
-```
-
-##### Success response
-* Sent by: credential process
-* Purpose: Gives the credential to Cargo
-```javascript
-{"Ok":{
-    // Response kind: this was a get request kind
-    "kind":"get",
-    // Token to send to the registry
-    "token":"...",
-    // Cache control. Can be one of the following:
-    // * "never"
-    // * "session"
-    // * { "expires": UNIX timestamp }
-    "cache":{"expires":1684251794},
-    // Is the token operation independent?
-    "operation_independent":true
-}}
-```
-
-##### Failure response
-* Sent by: credential process
-* Purpose: Gives error information to Cargo
-```javascript
-{"Err":{
-    // Error: the credential provider does not support the
-    // registry
-    "kind":"url-not-supported",
-    
-    // Error: The credential could not be found in the provider.
-    // using `cargo login --registry ...`.
-    "kind":"not-found",
-    
-    // Error: something else has failed
-    "kind":"other",
-    "detail": "free form string error message"
-}}
-```
-
-##### Example communication to request a token for reading:
-1. Cargo spawns the credential process, capturing stdin and stdout.
-2. Credential process sends the Hello message to Cargo
-    ```javascript
-    { "v": [1] }
-   ```
-3. Cargo sends the CredentialRequest message to the credential process (newlines added for readability).
-    ```javascript
-    {
-        "v": 1,
-        "kind": "get",
-        "operation": "read",
-        "registry":{"index-url":"sparse+https://registry-url/index/", "name":"ado2"},
-        "args":[]
-    }
-    ```
-4. Credential process sends the CredentialResponse to Cargo (newlines added for readability).
-    ```javascript
-    {
-        "token": "...",
-        "cache": "session",
-        "operation_independent": false
-    }
-    ```
-5. Credential process exits
-6. Cargo uses the token for the remainder of the session (until Cargo exits) when interacting with this registry.
-
-[`cargo login`]: ../commands/cargo-login.md
-[`cargo logout`]: ../commands/cargo-logout.md
-[`cargo publish`]: ../commands/cargo-publish.md
-[`cargo owner`]: ../commands/cargo-owner.md
-[`cargo yank`]: ../commands/cargo-yank.md
-[`credentials.toml` file]: config.md#credentials
-[crates.io]: https://crates.io/
-[config file]: config.md
-
-### `cargo config`
+## `cargo config`
 
 * Original Issue: [#2362](https://github.com/rust-lang/cargo/issues/2362)
 * Tracking Issue: [#9301](https://github.com/rust-lang/cargo/issues/9301)
@@ -1273,7 +1105,7 @@ cargo +nightly -Zunstable-options config get build.rustflags
 If no config value is included, it will display all config values. See the
 `--help` output for more options available.
 
-### rustc `--print`
+## rustc `--print`
 
 * Tracking Issue: [#9357](https://github.com/rust-lang/cargo/issues/9357)
 
@@ -1288,7 +1120,7 @@ The primary use case is to run `cargo rustc --print=cfg` to get config values
 for the appropriate target and influenced by any other RUSTFLAGS.
 
 
-### Different binary name
+## Different binary name
 
 * Tracking Issue: [#9778](https://github.com/rust-lang/cargo/issues/9778)
 * PR: [#9627](https://github.com/rust-lang/cargo/pull/9627)
@@ -1315,7 +1147,7 @@ filename = "007bar"
 path = "src/main.rs"
 ```
 
-### scrape-examples
+## scrape-examples
 
 * RFC: [#3123](https://github.com/rust-lang/rfcs/pull/3123)
 * Tracking Issue: [#9910](https://github.com/rust-lang/cargo/issues/9910)
@@ -1358,55 +1190,19 @@ If you want examples to be scraped from example targets, then you must not satis
 For example, you can set `doc-scrape-examples` to true for one example target, and that signals to Cargo that
 you are ok with dev-deps being build for `cargo doc`.
 
+## output-format for rustdoc
 
-### check-cfg
+* Tracking Issue: [#13283](https://github.com/rust-lang/cargo/issues/13283)
 
-* RFC: [#3013](https://github.com/rust-lang/rfcs/pull/3013)
-* Tracking Issue: [#10554](https://github.com/rust-lang/cargo/issues/10554)
+This flag determines the output format of `cargo rustdoc`, accepting `html` or `json`, providing tools with a way to lean on [rustdoc's experimental JSON format](https://doc.rust-lang.org/nightly/nightly-rustc/rustdoc_json_types/).
 
-`-Z check-cfg` command line enables compile time checking of name and values in `#[cfg]`, `cfg!`,
-`#[link]` and `#[cfg_attr]` with the `rustc` and `rustdoc` unstable `--check-cfg` command line.
-
-It's values are:
- - `features`: enables features checking via `--check-cfg=values(feature, ...)`.
-    Note than this command line options will probably become the default when stabilizing.
- - `names`: enables well known names checking via `--check-cfg=names()`.
- - `values`: enables well known values checking via `--check-cfg=values()`.
- - `output`: enable the use of `rustc-check-cfg` in build script.
-
-For instance:
+You can use the flag like this:
 
 ```
-cargo check -Z unstable-options -Z check-cfg=features
-cargo check -Z unstable-options -Z check-cfg=names
-cargo check -Z unstable-options -Z check-cfg=values
-cargo check -Z unstable-options -Z check-cfg=features,names,values
+cargo rustdoc -Z unstable-options --output-format json
 ```
 
-Or for `output`:
-
-```rust,no_run
-// build.rs
-println!("cargo:rustc-check-cfg=names(foo, bar)");
-```
-
-```
-cargo check -Z unstable-options -Z check-cfg=output
-```
-
-#### `cargo:rustc-check-cfg=CHECK_CFG`
-
-The `rustc-check-cfg` instruction tells Cargo to pass the given value to the
-`--check-cfg` flag to the compiler. This may be used for compile-time
-detection of unexpected conditional compilation name and/or values.
-
-This can only be used in combination with `-Zcheck-cfg=output` otherwise it is ignored
-with a warning.
-
-If you want to integrate with Cargo features, use `-Zcheck-cfg=features` instead of
-trying to do it manually with this option.
-
-### codegen-backend
+## codegen-backend
 
 The `codegen-backend` feature makes it possible to select the codegen backend used by rustc using a profile.
 
@@ -1435,11 +1231,11 @@ codegen-backend = true
 codegen-backend = "cranelift"
 ```
 
-### gitoxide
+## gitoxide
 
 * Tracking Issue: [#11813](https://github.com/rust-lang/cargo/issues/11813)
 
-With the 'gitoxide' unstable feature, all or the specified git operations will be performed by 
+With the 'gitoxide' unstable feature, all or the specified git operations will be performed by
 the `gitoxide` crate instead of `git2`.
 
 While `-Zgitoxide` enables all currently implemented features, one can individually select git operations
@@ -1448,21 +1244,34 @@ to run with `gitoxide` with the `-Zgitoxide=operation[,operationN]` syntax.
 Valid operations are the following:
 
 * `fetch` - All fetches are done with `gitoxide`, which includes git dependencies as well as the crates index.
+* `checkout` *(planned)* - checkout the worktree, with support for filters and submodules.
+
+## git
+
+* Tracking Issue: [#13285](https://github.com/rust-lang/cargo/issues/13285)
+
+With the 'git' unstable feature, both `gitoxide` and `git2` will perform shallow fetches of the crate
+index and git dependencies.
+
+While `-Zgit` enables all currently implemented features, one can individually select when to perform
+shallow fetches with the `-Zgit=operation[,operationN]` syntax.
+
+Valid operations are the following:
+
 * `shallow-index` - perform a shallow clone of the index.
 * `shallow-deps` - perform a shallow clone of git dependencies.
-* `checkout` *(planned)* - checkout the worktree, with support for filters and submodules.
 
 **Details on shallow clones**
 
-* To enable shallow clones, add `-Zgitoxide=fetch,shallow_deps` for fetching git dependencies or `-Zgitoxide=fetch,shallow_index` for fetching registry index.
+* To enable shallow clones, add `-Zgit=shallow-deps` for fetching git dependencies or `-Zgit=shallow-index` for fetching registry index.
 * Shallow-cloned and shallow-checked-out git repositories reside at their own `-shallow` suffixed directories, i.e,
   - `~/.cargo/registry/index/*-shallow`
   - `~/.cargo/git/db/*-shallow`
   - `~/.cargo/git/checkouts/*-shallow`
 * When the unstable feature is on, fetching/cloning a git repository is always a shallow fetch. This roughly equals to `git fetch --depth 1` everywhere.
-* Even with the presence of `Cargo.lock` or specifying a commit `{ rev = "…" }`, gitoxide is still smart enough to shallow fetch without unshallowing the existing repository.
+* Even with the presence of `Cargo.lock` or specifying a commit `{ rev = "…" }`, gitoxide and libgit2 are still smart enough to shallow fetch without unshallowing the existing repository.
 
-### script
+## script
 
 * Tracking Issue: [#12207](https://github.com/rust-lang/cargo/issues/12207)
 
@@ -1476,13 +1285,12 @@ fn main() {}
 ```
 
 A user may optionally specify a manifest in a `cargo` code fence in a module-level comment, like:
-```rust
+````rust
 #!/usr/bin/env -S cargo +nightly -Zscript
-
-//! ```cargo
-//! [dependencies]
-//! clap = { version = "4.2", features = ["derive"] }
-//! ```
+---cargo
+[dependencies]
+clap = { version = "4.2", features = ["derive"] }
+---
 
 use clap::Parser;
 
@@ -1497,9 +1305,9 @@ fn main() {
     let args = Args::parse();
     println!("{:?}", args);
 }
-```
+````
 
-#### Single-file packages
+### Single-file packages
 
 In addition to today's multi-file packages (`Cargo.toml` file with other `.rs`
 files), we are adding the concept of single-file packages which may contain an
@@ -1510,35 +1318,18 @@ Single-file packages may be selected via `--manifest-path`, like
 `cargo test --manifest-path foo.rs`. Unlike `Cargo.toml`, these files cannot be auto-discovered.
 
 A single-file package may contain an embedded manifest.  An embedded manifest
-is stored using `TOML` in a markdown code-fence with `cargo` at the start of the
-infostring inside a target-level doc-comment.  It is an error to have multiple
-`cargo` code fences in the target-level doc-comment.  We can relax this later,
-either merging the code fences or ignoring later code fences.
-
-Supported forms of embedded manifest are:
-``````rust
-//! ```cargo
-//! ```
-``````
-``````rust
-/*!
- * ```cargo
- * ```
- */
-``````
+is stored using `TOML` in rust "frontmatter", a markdown code-fence with `cargo`
+at the start of the infostring at the top of the file.
 
 Inferred / defaulted manifest fields:
 - `package.name = <slugified file stem>`
-- `package.version = "0.0.0"` to [call attention to this crate being used in unexpected places](https://matklad.github.io/2021/08/22/large-rust-workspaces.html#Smaller-Tips)
-- `package.publish = false` to avoid accidental publishes, particularly if we
-  later add support for including them in a workspace.
 - `package.edition = <current>` to avoid always having to add an embedded
   manifest at the cost of potentially breaking scripts on rust upgrades
   - Warn when `edition` is unspecified to raise awareness of this
 
 Disallowed manifest fields:
 - `[workspace]`, `[lib]`, `[[bin]]`, `[[example]]`, `[[test]]`, `[[bench]]`
-- `package.workspace`, `package.build`, `package.links`, `package.autobins`, `package.autoexamples`, `package.autotests`, `package.autobenches`
+- `package.workspace`, `package.build`, `package.links`, `package.autolib`, `package.autobins`, `package.autoexamples`, `package.autotests`, `package.autobenches`
 
 The default `CARGO_TARGET_DIR` for single-file packages is at `$CARGO_HOME/target/<hash>`:
 - Avoid conflicts from multiple single-file packages being in the same directory
@@ -1549,7 +1340,7 @@ The lockfile for single-file packages will be placed in `CARGO_TARGET_DIR`.  In
 the future, when workspaces are supported, that will allow a user to have a
 persistent lockfile.
 
-#### Manifest-commands
+### Manifest-commands
 
 You may pass a manifest directly to the `cargo` command, without a subcommand,
 like `foo/Cargo.toml` or a single-file package like `foo.rs`.  This is mostly
@@ -1569,133 +1360,419 @@ Differences between `cargo run --manifest-path <path>` and `cargo <path>`
 - `cargo <path>` runs with the config for `<path>` and not the current dir, more like `cargo install --path <path>`
 - `cargo <path>` is at a verbosity level below the normal default.  Pass `-v` to get normal output.
 
-### `[lints]`
+### Documentation Updates
 
-* Tracking Issue: [#12115](https://github.com/rust-lang/cargo/issues/12115)
+## Profile `trim-paths` option
 
-A new `lints` table would be added to configure lints:
+* Tracking Issue: [rust-lang/cargo#12137](https://github.com/rust-lang/cargo/issues/12137)
+* Tracking Rustc Issue: [rust-lang/rust#111540](https://github.com/rust-lang/rust/issues/111540)
+
+This adds a new profile setting to control how paths are sanitized in the resulting binary.
+This can be enabled like so:
+
 ```toml
-[lints.rust]
-unsafe = "forbid"
-```
-and `cargo` would pass these along as flags to `rustc`, `clippy`, or other lint tools when `-Zlints` is used.
+cargo-features = ["trim-paths"]
 
-This would work with
+[package]
+# ...
+
+[profile.release]
+trim-paths = ["diagnostics", "object"]
+```
+
+To set this in a profile in Cargo configuration,
+you need to use either `-Z trim-paths` or `[unstable]` table to enable it.
+For example,
+
+```toml
+# .cargo/config.toml
+[unstable]
+trim-paths = true
+
+[profile.release]
+trim-paths = ["diagnostics", "object"]
+```
+
+### Documentation updates
+
+#### trim-paths
+
+*as a new ["Profiles settings" entry](./profiles.html#profile-settings)*
+
+`trim-paths` is a profile setting which enables and controls the sanitization of file paths in build outputs.
+It takes the following values:
+
+- `"none"` and `false` --- disable path sanitization
+- `"macro"` --- sanitize paths in the expansion of `std::file!()` macro.
+    This is where paths in embedded panic messages come from
+- `"diagnostics"` --- sanitize paths in printed compiler diagnostics
+- `"object"` --- sanitize paths in compiled executables or libraries
+- `"all"` and `true` --- sanitize paths in all possible locations
+
+It also takes an array with the combinations of `"macro"`, `"diagnostics"`, and `"object"`.
+
+It is defaulted to `none` for the `dev` profile, and `object` for the `release` profile.
+You can manually override it by specifying this option in `Cargo.toml`:
+
+```toml
+[profile.dev]
+trim-paths = "all"
+
+[profile.release]
+trim-paths = ["object", "diagnostics"]
+```
+
+The default `release` profile setting (`object`) sanitizes only the paths in emitted executable or library files.
+It always affects paths from macros such as panic messages, and in debug information only if they will be embedded together with the binary
+(the default on platforms with ELF binaries, such as Linux and windows-gnu),
+but will not touch them if they are in separate files (the default on Windows MSVC and macOS).
+But the paths to these separate files are sanitized.
+
+If `trim-paths` is not `none` or `false`, then the following paths are sanitized if they appear in a selected scope:
+
+1. Path to the source files of the standard and core library (sysroot) will begin with `/rustc/[rustc commit hash]`,
+   e.g. `/home/username/.rustup/toolchains/nightly-x86_64-unknown-linux-gnu/lib/rustlib/src/rust/library/core/src/result.rs` ->
+   `/rustc/fe72845f7bb6a77b9e671e6a4f32fe714962cec4/library/core/src/result.rs`
+2. Path to the current package will be stripped, relatively to the current workspace root, e.g. `/home/username/crate/src/lib.rs` -> `src/lib.rs`.
+3. Path to dependency packages will be replaced with `[package name]-[version]`. E.g. `/home/username/deps/foo/src/lib.rs` -> `foo-0.1.0/src/lib.rs`
+
+When a path to the source files of the standard and core library is *not* in scope for sanitization,
+the emitted path will depend on if `rust-src` component is present.
+If it is, then some paths will point to the copy of the source files on your file system;
+if it isn't, then they will show up as `/rustc/[rustc commit hash]/library/...`
+(just like when it is selected for sanitization).
+Paths to all other source files will not be affected.
+
+This will not affect any hard-coded paths in the source code, such as in strings.
+
+#### Environment variable
+
+*as a new entry of ["Environment variables Cargo sets for build scripts"](./environment-variables.md#environment-variables-cargo-sets-for-crates)*
+
+* `CARGO_TRIM_PATHS` --- The value of `trim-paths` profile option.
+    `false`, `"none"`, and empty arrays would be converted to `none`.
+    `true` and `"all"` become `all`.
+    Values in a non-empty array would be joined into a comma-separated list.
+    If the build script introduces absolute paths to built artifacts (such as by invoking a compiler),
+    the user may request them to be sanitized in different types of artifacts.
+    Common paths requiring sanitization include `OUT_DIR`, `CARGO_MANIFEST_DIR` and `CARGO_MANIFEST_PATH`,
+    plus any other introduced by the build script, such as include directories.
+
+## gc
+
+* Tracking Issue: [#12633](https://github.com/rust-lang/cargo/issues/12633)
+
+The `-Zgc` flag enables garbage-collection within cargo's global cache within the cargo home directory.
+This includes downloaded dependencies such as compressed `.crate` files, extracted `src` directories, registry index caches, and git dependencies.
+When `-Zgc` is present, cargo will track the last time any index and dependency was used,
+and then uses those timestamps to manually or automatically delete cache entries that have not been used for a while.
+
+```sh
+cargo build -Zgc
+```
+
+### Automatic garbage collection
+
+Automatic deletion happens on commands that are already doing a significant amount of work,
+such as all of the build commands (`cargo build`, `cargo test`, `cargo check`, etc.), and `cargo fetch`.
+The deletion happens just after resolution and packages have been downloaded.
+Automatic deletion is only done once per day (see `gc.auto.frequency` to configure).
+Automatic deletion is disabled if cargo is offline such as with `--offline` or `--frozen` to avoid deleting artifacts that may need to be used if you are offline for a long period of time.
+
+#### Automatic gc configuration
+
+The automatic gc behavior can be specified via a cargo configuration setting.
+The settings available are:
+
+```toml
+# Example config.toml file.
+
+# This table defines the behavior for automatic garbage collection.
+[gc.auto]
+# The maximum frequency that automatic garbage collection happens.
+# Can be "never" to disable automatic-gc, or "always" to run on every command.
+frequency = "1 day"
+# Anything older than this duration will be deleted in the source cache.
+max-src-age = "1 month"
+# Anything older than this duration will be deleted in the compressed crate cache.
+max-crate-age = "3 months"
+# Any index older than this duration will be deleted from the index cache.
+max-index-age = "3 months"
+# Any git checkout older than this duration will be deleted from the checkout cache.
+max-git-co-age = "1 month"
+# Any git clone older than this duration will be deleted from the git cache.
+max-git-db-age = "3 months"
+```
+
+### Manual garbage collection with `cargo clean`
+
+Manual deletion can be done with the `cargo clean gc` command.
+Deletion of cache contents can be performed by passing one of the cache options:
+
+- `--max-src-age=DURATION` --- Deletes source cache files that have not been used since the given age.
+- `--max-crate-age=DURATION` --- Deletes crate cache files that have not been used since the given age.
+- `--max-index-age=DURATION` --- Deletes registry indexes that have not been used since then given age (including their `.crate` and `src` files).
+- `--max-git-co-age=DURATION` --- Deletes git dependency checkouts that have not been used since then given age.
+- `--max-git-db-age=DURATION` --- Deletes git dependency clones that have not been used since then given age.
+- `--max-download-age=DURATION` --- Deletes any downloaded cache data that has not been used since then given age.
+- `--max-src-size=SIZE` --- Deletes the oldest source cache files until the cache is under the given size.
+- `--max-crate-size=SIZE` --- Deletes the oldest crate cache files until the cache is under the given size.
+- `--max-git-size=SIZE` --- Deletes the oldest git dependency caches until the cache is under the given size.
+- `--max-download-size=SIZE` --- Deletes the oldest downloaded cache data until the cache is under the given size.
+
+A DURATION is specified in the form "N seconds/minutes/days/weeks/months" where N is an integer.
+
+A SIZE is specified in the form "N *suffix*" where *suffix* is B, kB, MB, GB, kiB, MiB, or GiB, and N is an integer or floating point number. If no suffix is specified, the number is the number of bytes.
+
+```sh
+cargo clean gc
+cargo clean gc --max-download-age=1week
+cargo clean gc --max-git-size=0 --max-download-size=100MB
+```
+
+## open-namespaces
+
+* Tracking Issue: [#13576](https://github.com/rust-lang/cargo/issues/13576)
+
+Allow multiple packages to participate in the same API namespace
+
+This can be enabled like so:
+```toml
+cargo-features = ["open-namespaces"]
+
+[package]
+# ...
+```
+
+## `[lints.cargo]`
+
+* Tracking Issue: [#12235](https://github.com/rust-lang/cargo/issues/12235)
+
+A new `lints` tool table for `cargo` that can be used to configure lints emitted
+by `cargo` itself when `-Zcargo-lints` is used
+```toml
+[lints.cargo]
+implicit-features = "warn"
+```
+
+This will work with
 [RFC 2906 `workspace-deduplicate`](https://rust-lang.github.io/rfcs/2906-cargo-workspace-deduplicate.html):
 ```toml
+[workspace.lints.cargo]
+implicit-features = "warn"
+
 [lints]
 workspace = true
-
-[workspace.lints.rust]
-unsafe = "forbid"
 ```
 
-#### Documentation Updates
+## Path Bases
 
-##### The `lints` section
+* Tracking Issue: [#14355](https://github.com/rust-lang/cargo/issues/14355)
 
-*as a new ["Manifest Format" entry](./manifest.html#the-manifest-format)*
+A `path` dependency may optionally specify a base by setting the `base` key to
+the name of a path base from the `[path-bases]` table in either the
+[configuration](config.md) or one of the [built-in path bases](#built-in-path-bases).
+The value of that path base is prepended to the `path` value (along with a path
+separator if necessary) to produce the actual location where Cargo will look for
+the dependency.
 
-Override the default level of lints from different tools by assigning them to a new level in a
-table, for example:
+For example, if the `Cargo.toml` contains:
+
 ```toml
-[lints.rust]
-unsafe = "forbid"
+cargo-features = ["path-bases"]
+
+[dependencies]
+foo = { base = "dev", path = "foo" }
 ```
 
-This is short-hand for:
+Given a `[path-bases]` table in the configuration that contains:
+
 ```toml
-[lints.rust]
-unsafe = { level = "forbid", priority = 0 }
+[path-bases]
+dev = "/home/user/dev/rust/libraries/"
 ```
 
-`level` corresponds to the lint levels in `rustc`:
-- `forbid`
-- `deny`
-- `warn`
-- `allow`
+This will produce a `path` dependency `foo` located at
+`/home/user/dev/rust/libraries/foo`.
 
-`priority` is a signed integer that controls which lints or lint groups override other lint groups:
-- lower (particularly negative) numbers have lower priority, being overridden
-  by higher numbers, and show up first on the command-line to tools like
-  `rustc`
+Path bases can be either absolute or relative. Relative path bases are relative
+to the parent directory of the configuration file that declared that path base.
 
-To know which table under `[lints]` a particular lint belongs under, it is the part before `::` in the lint
-name.  If there isn't a `::`, then the tool is `rust`.  For example a warning
-about `unsafe` would be `lints.rust.unsafe` but a lint about
-`clippy::enum_glob_use` would be `lints.clippy.enum_glob_use`.
+The name of a path base must use only [alphanumeric](https://doc.rust-lang.org/std/primitive.char.html#method.is_alphanumeric)
+characters or `-` or `_`, must start with an [alphabetic](https://doc.rust-lang.org/std/primitive.char.html#method.is_alphabetic)
+character, and must not be empty.
 
-For example:
-```toml
-[lints.rust]
-unsafe = "forbid"
+If the name of path base used in a dependency is neither in the configuration
+nor one of the built-in path base, then Cargo will raise an error.
 
-[lints.clippy]
-enum_glob_use = "deny"
-```
+#### Built-in path bases
 
-##### The `lints` table
+Cargo provides implicit path bases that can be used without the need to specify
+them in a `[path-bases]` table.
 
-*as a new [`[workspace]` entry](./workspaces.html#the-workspace-section)*
+* `workspace` - If a project is [a workspace or workspace member](workspaces.md)
+then this path base is defined as the parent directory of the root `Cargo.toml`
+of the workspace.
 
-The `workspace.lints` table is where you define lint configuration to be inherited by members of a workspace.
+If a built-in path base name is also declared in the configuration, then Cargo
+will prefer the value in the configuration. The allows Cargo to add new built-in
+path bases without compatibility issues (as existing uses will shadow the
+built-in name).
 
-Specifying a workspace lint configuration is similar to package lints.
+## lockfile-path
+* Original Issue: [#5707](https://github.com/rust-lang/cargo/issues/5707)
+* Tracking Issue: [#14421](https://github.com/rust-lang/cargo/issues/14421)
 
+This feature allows you to specify the path of lockfile Cargo.lock. 
+By default, lockfile is written into `<workspace_root>/Cargo.lock`. 
+However, when sources are stored in read-only directory, most of the cargo commands 
+would fail, trying to write a lockfile. The `--lockfile-path`
+flag makes it easier to work with readonly sources. 
+Note, that currently path must end with `Cargo.lock`. Meaning, if you want to use 
+this feature in multiple projects, lockfiles should be stored in different directories.
 Example:
 
-```toml
-# [PROJECT_DIR]/Cargo.toml
-[workspace]
-members = ["crates/*"]
-
-[workspace.lints.rust]
-unsafe = "forbid"
+```sh
+cargo +nightly metadata --lockfile-path=$LOCKFILES_ROOT/my-project/Cargo.lock -Z unstable-options
 ```
 
-```toml
-# [PROJECT_DIR]/crates/bar/Cargo.toml
-[package]
-name = "bar"
-version = "0.1.0"
+## package-workspace
+* Tracking Issue: [#10948](https://github.com/rust-lang/cargo/issues/10948)
 
-[lints]
-workspace = true
+This allows cargo to package (or publish) multiple crates in a workspace, even
+if they have inter-dependencies. For example, consider a workspace containing
+packages `foo` and `dep`, where `foo` depends on `dep`. Then
+
+```sh
+cargo +nightly -Zpackage-workspace package -p foo -p dep
 ```
 
-## Stabilized and removed features
+will package both `foo` and `dep`, while
 
-### Compile progress
+```sh
+cargo +nightly -Zpackage-workspace publish -p foo -p dep
+```
+
+will publish both `foo` and `dep`.
+If `foo` and `dep` are the only crates in the workspace, you can use the `--workspace`
+flag instead of specifying the crates individually:
+
+```sh
+cargo +nightly -Zpackage-workspace package --workspace
+cargo +nightly -Zpackage-workspace publish --workspace
+```
+
+#### Lock-file behavior
+
+When packaging a binary at the same time as one of its dependencies, the binary
+will be packaged with a lock-file pointing at the dependency's registry entry
+*as though the dependency were already published*, even though it has not yet
+been. In this case, `cargo` needs to know the registry that the dependency
+will eventually be published on. `cargo` will attempt to infer this registry
+by examining the [the `publish` field](manifest.md#the-publish-field), falling back
+to `crates.io` if no `publish` field is set. To explicitly set the registry,
+pass a `--registry` or `--index` flag.
+
+```sh
+cargo +nightly -Zpackage-workspace --registry=my-registry package -p foo -p dep
+cargo +nightly -Zpackage-workspace --index=https://example.com package -p foo -p dep
+```
+
+## native-completions
+* Original Issue: [#6645](https://github.com/rust-lang/cargo/issues/6645)
+* Tracking Issue: [#14520](https://github.com/rust-lang/cargo/issues/14520)
+
+This feature moves the handwritten completion scripts to Rust native, making it
+easier for us to add, extend and test new completions. This feature is enabled with the
+nightly channel, without requiring additional `-Z` options.
+
+Areas of particular interest for feedback
+- Arguments that need escaping or quoting that aren't handled correctly
+- Inaccuracies in the information
+- Bugs in parsing of the command-line
+- Arguments that don't report their completions
+- If a known issue is being problematic
+
+Feedback can be broken down into
+- What completion candidates are reported
+  - Known issues: [#14520](https://github.com/rust-lang/cargo/issues/14520), [`A-completions`](https://github.com/rust-lang/cargo/labels/A-completions)
+  - [Report an issue](https://github.com/rust-lang/cargo/issues/new) or [discuss the behavior](https://github.com/rust-lang/cargo/issues/14520)
+- Shell integration, command-line parsing, and completion filtering
+  - Known issues: [clap#3166](https://github.com/clap-rs/clap/issues/3166), [clap's `A-completions`](https://github.com/clap-rs/clap/labels/A-completion)
+  - [Report an issue](https://github.com/clap-rs/clap/issues/new/choose) or [discuss the behavior](https://github.com/clap-rs/clap/discussions/new/choose)
+
+When in doubt, you can discuss this in [#14520](https://github.com/rust-lang/cargo/issues/14520) or on [zulip](https://rust-lang.zulipchat.com/#narrow/stream/246057-t-cargo)
+
+### How to use native-completions feature:
+- bash:
+  Add `source <(CARGO_COMPLETE=bash cargo +nightly)` to your .bashrc.
+
+- zsh:
+  Add `source <(CARGO_COMPLETE=zsh cargo +nightly)` to your .zshrc.
+  
+- fish:
+  Add `source (CARGO_COMPLETE=fish cargo +nightly | psub)` to `$XDG_CONFIG_HOME/fish/completions/cargo.fish`
+
+- elvish:
+  Add `eval (E:CARGO_COMPLETE=elvish cargo +nightly | slurp)` to `$XDG_CONFIG_HOME/elvish/rc.elv`
+
+- powershell:
+  Add `CARGO_COMPLETE=powershell cargo +nightly | Invoke-Expression` to `$PROFILE`.
+
+## warnings
+
+* Original Issue: [#8424](https://github.com/rust-lang/cargo/issues/8424)
+* Tracking Issue: [#14802](https://github.com/rust-lang/cargo/issues/14802)
+
+The `-Z warnings` feature enables the `build.warnings` configuration option to control how
+Cargo handles warnings. If the `-Z warnings` unstable flag is not enabled, then
+the `build.warnings` config will be ignored.
+
+This setting currently only applies to rustc warnings. It may apply to additional warnings (such as Cargo lints or Cargo warnings)
+in the future.
+
+### `build.warnings`
+* Type: string
+* Default: `warn`
+* Environment: `CARGO_BUILD_WARNINGS`
+
+Controls how Cargo handles warnings. Allowed values are:
+* `warn`: warnings are emitted as warnings (default).
+* `allow`: warnings are hidden.
+* `deny`: if warnings are emitted, an error will be raised at the end of the operation and the process will exit with a failure exit code. 
+# Stabilized and removed features
+
+## Compile progress
 
 The compile-progress feature has been stabilized in the 1.30 release.
 Progress bars are now enabled by default.
 See [`term.progress`](config.md#termprogresswhen) for more information about
 controlling this feature.
 
-### Edition
+## Edition
 
 Specifying the `edition` in `Cargo.toml` has been stabilized in the 1.31 release.
 See [the edition field](manifest.md#the-edition-field) for more information
 about specifying this field.
 
-### rename-dependency
+## rename-dependency
 
 Specifying renamed dependencies in `Cargo.toml` has been stabilized in the 1.31 release.
 See [renaming dependencies](specifying-dependencies.md#renaming-dependencies-in-cargotoml)
 for more information about renaming dependencies.
 
-### Alternate Registries
+## Alternate Registries
 
 Support for alternate registries has been stabilized in the 1.34 release.
 See the [Registries chapter](registries.md) for more information about alternate registries.
 
-### Offline Mode
+## Offline Mode
 
 The offline feature has been stabilized in the 1.36 release.
 See the [`--offline` flag](../commands/cargo.md#option-cargo---offline) for
 more information on using the offline mode.
 
-### publish-lockfile
+## publish-lockfile
 
 The `publish-lockfile` feature has been removed in the 1.37 release.
 The `Cargo.lock` file is always included when a package is published if the
@@ -1704,19 +1781,19 @@ to use the `Cargo.lock` file.
 See [`cargo package`](../commands/cargo-package.md) and
 [`cargo install`](../commands/cargo-install.md) for more information.
 
-### default-run
+## default-run
 
 The `default-run` feature has been stabilized in the 1.37 release.
 See [the `default-run` field](manifest.md#the-default-run-field) for more
 information about specifying the default target to run.
 
-### cache-messages
+## cache-messages
 
 Compiler message caching has been stabilized in the 1.40 release.
 Compiler warnings are now cached by default and will be replayed automatically
 when re-running Cargo.
 
-### install-upgrade
+## install-upgrade
 
 The `install-upgrade` feature has been stabilized in the 1.41 release.
 [`cargo install`] will now automatically upgrade packages if they appear to be
@@ -1724,129 +1801,129 @@ out-of-date. See the [`cargo install`] documentation for more information.
 
 [`cargo install`]: ../commands/cargo-install.md
 
-### Profile Overrides
+## Profile Overrides
 
 Profile overrides have been stabilized in the 1.41 release.
 See [Profile Overrides](profiles.md#overrides) for more information on using
 overrides.
 
-### Config Profiles
+## Config Profiles
 
 Specifying profiles in Cargo config files and environment variables has been
 stabilized in the 1.43 release.
 See the [config `[profile]` table](config.md#profile) for more information
 about specifying [profiles](profiles.md) in config files.
 
-### crate-versions
+## crate-versions
 
 The `-Z crate-versions` flag has been stabilized in the 1.47 release.
 The crate version is now automatically included in the
 [`cargo doc`](../commands/cargo-doc.md) documentation sidebar.
 
-### Features
+## Features
 
 The `-Z features` flag has been stabilized in the 1.51 release.
 See [feature resolver version 2](features.md#feature-resolver-version-2)
 for more information on using the new feature resolver.
 
-### package-features
+## package-features
 
 The `-Z package-features` flag has been stabilized in the 1.51 release.
 See the [resolver version 2 command-line flags](features.md#resolver-version-2-command-line-flags)
 for more information on using the features CLI options.
 
-### Resolver
+## Resolver
 
 The `resolver` feature in `Cargo.toml` has been stabilized in the 1.51 release.
 See the [resolver versions](resolver.md#resolver-versions) for more
 information about specifying resolvers.
 
-### extra-link-arg
+## extra-link-arg
 
 The `extra-link-arg` feature to specify additional linker arguments in build
 scripts has been stabilized in the 1.56 release. See the [build script
 documentation](build-scripts.md#outputs-of-the-build-script) for more
 information on specifying extra linker arguments.
 
-### configurable-env
+## configurable-env
 
 The `configurable-env` feature to specify environment variables in Cargo
 configuration has been stabilized in the 1.56 release. See the [config
 documentation](config.html#env) for more information about configuring
 environment variables.
 
-### rust-version
+## rust-version
 
 The `rust-version` field in `Cargo.toml` has been stabilized in the 1.56 release.
 See the [rust-version field](manifest.html#the-rust-version-field) for more
 information on using the `rust-version` field and the `--ignore-rust-version` option.
 
-### patch-in-config
+## patch-in-config
 
 The `-Z patch-in-config` flag, and the corresponding support for
 `[patch]` section in Cargo configuration files has been stabilized in
 the 1.56 release. See the [patch field](config.html#patch) for more
 information.
 
-### edition 2021
+## edition 2021
 
 The 2021 edition has been stabilized in the 1.56 release.
 See the [`edition` field](manifest.md#the-edition-field) for more information on setting the edition.
 See [`cargo fix --edition`](../commands/cargo-fix.md) and [The Edition Guide](../../edition-guide/index.html) for more information on migrating existing projects.
 
 
-### Custom named profiles
+## Custom named profiles
 
 Custom named profiles have been stabilized in the 1.57 release. See the
 [profiles chapter](profiles.md#custom-profiles) for more information.
 
-### Profile `strip` option
+## Profile `strip` option
 
 The profile `strip` option has been stabilized in the 1.59 release. See the
 [profiles chapter](profiles.md#strip) for more information.
 
-### Future incompat report
+## Future incompat report
 
 Support for generating a future-incompat report has been stabilized
 in the 1.59 release. See the [future incompat report chapter](future-incompat-report.md)
 for more information.
 
-### Namespaced features
+## Namespaced features
 
 Namespaced features has been stabilized in the 1.60 release.
 See the [Features chapter](features.md#optional-dependencies) for more information.
 
-### Weak dependency features
+## Weak dependency features
 
 Weak dependency features has been stabilized in the 1.60 release.
 See the [Features chapter](features.md#dependency-features) for more information.
 
-### timings
+## timings
 
 The `-Ztimings` option has been stabilized as `--timings` in the 1.60 release.
 (`--timings=html` and the machine-readable `--timings=json` output remain
 unstable and require `-Zunstable-options`.)
 
-### config-cli
+## config-cli
 
 The `--config` CLI option has been stabilized in the 1.63 release. See
 the [config documentation](config.html#command-line-overrides) for more
 information.
 
-### multitarget
+## multitarget
 
 The `-Z multitarget` option has been stabilized in the 1.64 release.
 See [`build.target`](config.md#buildtarget) for more information about
 setting the default [target platform triples][target triple].
 
-### crate-type
+## crate-type
 
 The `--crate-type` flag for `cargo rustc` has been stabilized in the 1.64
 release. See the [`cargo rustc` documentation](../commands/cargo-rustc.md)
 for more information.
 
 
-### Workspace Inheritance
+## Workspace Inheritance
 
 Workspace Inheritance has been stabilized in the 1.64 release.
 See [workspace.package](workspaces.md#the-package-table),
@@ -1854,33 +1931,65 @@ See [workspace.package](workspaces.md#the-package-table),
 and [inheriting-a-dependency-from-a-workspace](specifying-dependencies.md#inheriting-a-dependency-from-a-workspace)
 for more information.
 
-### terminal-width
+## terminal-width
 
 The `-Z terminal-width` option has been stabilized in the 1.68 release.
 The terminal width is always passed to the compiler when running from a
 terminal where Cargo can automatically detect the width.
 
-### sparse-registry
+## sparse-registry
 
 Sparse registry support has been stabilized in the 1.68 release.
 See [Registry Protocols](registries.md#registry-protocols) for more information.
 
-#### `cargo logout`
+### `cargo logout`
 
 The [`cargo logout`] command has been stabilized in the 1.70 release.
 
 [target triple]: ../appendix/glossary.md#target '"target" (glossary)'
+[`cargo logout`]: ../commands/cargo-logout.md
 
-
-### `doctest-in-workspace`
+## `doctest-in-workspace`
 
 The `-Z doctest-in-workspace` option for `cargo test` has been stabilized and
 enabled by default in the 1.72 release. See the
 [`cargo test` documentation](../commands/cargo-test.md#working-directory-of-tests)
 for more information about the working directory for compiling and running tests.
 
-### keep-going
+## keep-going
 
 The `--keep-going` option has been stabilized in the 1.74 release. See the
 [`--keep-going` flag](../commands/cargo-build.html#option-cargo-build---keep-going)
 in `cargo build` as an example for more details.
+
+## `[lints]`
+
+[`[lints]`](manifest.html#the-lints-section) (enabled via `-Zlints`) has been stabilized in the 1.74 release.
+
+## credential-process
+
+The `-Z credential-process` feature has been stabilized in the 1.74 release.
+
+See [Registry Authentication](registry-authentication.md) documentation for details.
+
+## registry-auth
+
+The `-Z registry-auth` feature has been stabilized in the 1.74 release with the additional
+requirement that a credential-provider is configured.
+
+See [Registry Authentication](registry-authentication.md) documentation for details.
+
+## check-cfg
+
+The `-Z check-cfg` feature has been stabilized in the 1.80 release by making it the
+default behavior.
+
+See the [build script documentation](build-scripts.md#rustc-check-cfg) for information
+about specifying custom cfgs.
+
+## Edition 2024
+
+The 2024 edition has been stabilized in the 1.85 release.
+See the [`edition` field](manifest.md#the-edition-field) for more information on setting the edition.
+See [`cargo fix --edition`](../commands/cargo-fix.md) and [The Edition Guide](../../edition-guide/index.html) for more information on migrating existing projects.
+

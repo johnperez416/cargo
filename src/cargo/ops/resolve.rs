@@ -49,8 +49,8 @@
 //! [`Package`]: crate::core::package
 //! [`Target`]: crate::core::Target
 //! [`Manifest`]: crate::core::Manifest
-//! [`Source`]: crate::core::Source
-//! [`SourceMap`]: crate::core::SourceMap
+//! [`Source`]: crate::sources::source::Source
+//! [`SourceMap`]: crate::sources::source::SourceMap
 //! [`PackageRegistry`]: crate::core::registry::PackageRegistry
 //! [source implementations]: crate::sources
 //! [`Downloads`]: crate::core::package::Downloads
@@ -61,24 +61,35 @@ use crate::core::resolver::features::{
     CliFeatures, FeatureOpts, FeatureResolver, ForceAllTargets, RequestedFeatures, ResolvedFeatures,
 };
 use crate::core::resolver::{
-    self, HasDevUnits, Resolve, ResolveOpts, ResolveVersion, VersionPreferences,
+    self, HasDevUnits, Resolve, ResolveOpts, ResolveVersion, VersionOrdering, VersionPreferences,
 };
 use crate::core::summary::Summary;
-use crate::core::Feature;
-use crate::core::{GitReference, PackageId, PackageIdSpec, PackageSet, SourceId, Workspace};
+use crate::core::Dependency;
+use crate::core::GitReference;
+use crate::core::PackageId;
+use crate::core::PackageIdSpec;
+use crate::core::PackageIdSpecQuery;
+use crate::core::PackageSet;
+use crate::core::SourceId;
+use crate::core::Workspace;
 use crate::ops;
-use crate::sources::PathSource;
+use crate::sources::RecursivePathSource;
+use crate::util::cache_lock::CacheLockMode;
 use crate::util::errors::CargoResult;
-use crate::util::PartialVersion;
-use crate::util::{profile, CanonicalUrl};
+use crate::util::CanonicalUrl;
 use anyhow::Context as _;
+use cargo_util::paths;
+use cargo_util_schemas::core::PartialVersion;
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, trace};
 
+/// Filter for keep using Package ID from previous lockfile.
+type Keep<'a> = &'a dyn Fn(&PackageId) -> bool;
+
 /// Result for `resolve_ws_with_opts`.
-pub struct WorkspaceResolve<'cfg> {
+pub struct WorkspaceResolve<'gctx> {
     /// Packages to be downloaded.
-    pub pkg_set: PackageSet<'cfg>,
+    pub pkg_set: PackageSet<'gctx>,
     /// The resolve for the entire workspace.
     ///
     /// This may be `None` for things like `cargo install` and `-Zavoid-dev-deps`.
@@ -106,11 +117,9 @@ version. This may also occur with an optional dependency that is not enabled.";
 ///
 /// This is a simple interface used by commands like `clean`, `fetch`, and
 /// `package`, which don't specify any options or features.
-pub fn resolve_ws<'a>(ws: &Workspace<'a>) -> CargoResult<(PackageSet<'a>, Resolve)> {
-    let max_rust_version = ws.rust_version();
-
-    let mut registry = PackageRegistry::new(ws.config())?;
-    let resolve = resolve_with_registry(ws, &mut registry, max_rust_version)?;
+pub fn resolve_ws<'a>(ws: &Workspace<'a>, dry_run: bool) -> CargoResult<(PackageSet<'a>, Resolve)> {
+    let mut registry = ws.package_registry()?;
+    let resolve = resolve_with_registry(ws, &mut registry, dry_run)?;
     let packages = get_resolved_packages(&resolve, registry)?;
     Ok((packages, resolve))
 }
@@ -125,46 +134,56 @@ pub fn resolve_ws<'a>(ws: &Workspace<'a>) -> CargoResult<(PackageSet<'a>, Resolv
 ///
 /// `specs` may be empty, which indicates it should resolve all workspace
 /// members. In this case, `opts.all_features` must be `true`.
-pub fn resolve_ws_with_opts<'cfg>(
-    ws: &Workspace<'cfg>,
-    target_data: &mut RustcTargetData<'cfg>,
+pub fn resolve_ws_with_opts<'gctx>(
+    ws: &Workspace<'gctx>,
+    target_data: &mut RustcTargetData<'gctx>,
     requested_targets: &[CompileKind],
     cli_features: &CliFeatures,
     specs: &[PackageIdSpec],
     has_dev_units: HasDevUnits,
     force_all_targets: ForceAllTargets,
-    max_rust_version: Option<PartialVersion>,
-) -> CargoResult<WorkspaceResolve<'cfg>> {
-    let mut registry = PackageRegistry::new(ws.config())?;
-    let mut add_patches = true;
-    let resolve = if ws.ignore_lock() {
-        None
+    dry_run: bool,
+) -> CargoResult<WorkspaceResolve<'gctx>> {
+    let mut registry = ws.package_registry()?;
+    let (resolve, resolved_with_overrides) = if ws.ignore_lock() {
+        let add_patches = true;
+        let resolve = None;
+        let resolved_with_overrides = resolve_with_previous(
+            &mut registry,
+            ws,
+            cli_features,
+            has_dev_units,
+            resolve.as_ref(),
+            None,
+            specs,
+            add_patches,
+        )?;
+        ops::print_lockfile_changes(ws, None, &resolved_with_overrides, &mut registry)?;
+        (resolve, resolved_with_overrides)
     } else if ws.require_optional_deps() {
         // First, resolve the root_package's *listed* dependencies, as well as
         // downloading and updating all remotes and such.
-        let resolve = resolve_with_registry(ws, &mut registry, max_rust_version)?;
+        let resolve = resolve_with_registry(ws, &mut registry, dry_run)?;
         // No need to add patches again, `resolve_with_registry` has done it.
-        add_patches = false;
+        let add_patches = false;
 
         // Second, resolve with precisely what we're doing. Filter out
         // transitive dependencies if necessary, specify features, handle
         // overrides, etc.
-        let _p = profile::start("resolving with overrides...");
-
         add_overrides(&mut registry, ws)?;
 
-        for &(ref replace_spec, ref dep) in ws.root_replace() {
+        for (replace_spec, dep) in ws.root_replace() {
             if !resolve
                 .iter()
                 .any(|r| replace_spec.matches(r) && !dep.matches_id(r))
             {
-                ws.config()
+                ws.gctx()
                     .shell()
                     .warn(format!("package replacement is not used: {}", replace_spec))?
             }
 
             if dep.features().len() != 0 || !dep.uses_default_features() {
-                ws.config()
+                ws.gctx()
                 .shell()
                 .warn(format!(
                     "replacement for `{}` uses the features mechanism. \
@@ -174,22 +193,34 @@ pub fn resolve_ws_with_opts<'cfg>(
             }
         }
 
-        Some(resolve)
+        let resolved_with_overrides = resolve_with_previous(
+            &mut registry,
+            ws,
+            cli_features,
+            has_dev_units,
+            Some(&resolve),
+            None,
+            specs,
+            add_patches,
+        )?;
+        (Some(resolve), resolved_with_overrides)
     } else {
-        ops::load_pkg_lockfile(ws)?
+        let add_patches = true;
+        let resolve = ops::load_pkg_lockfile(ws)?;
+        let resolved_with_overrides = resolve_with_previous(
+            &mut registry,
+            ws,
+            cli_features,
+            has_dev_units,
+            resolve.as_ref(),
+            None,
+            specs,
+            add_patches,
+        )?;
+        // Skipping `print_lockfile_changes` as there are cases where this prints irrelevant
+        // information
+        (resolve, resolved_with_overrides)
     };
-
-    let resolved_with_overrides = resolve_with_previous(
-        &mut registry,
-        ws,
-        cli_features,
-        has_dev_units,
-        resolve.as_ref(),
-        None,
-        specs,
-        add_patches,
-        max_rust_version,
-    )?;
 
     let pkg_set = get_resolved_packages(&resolved_with_overrides, registry)?;
 
@@ -237,10 +268,11 @@ pub fn resolve_ws_with_opts<'cfg>(
     })
 }
 
-fn resolve_with_registry<'cfg>(
-    ws: &Workspace<'cfg>,
-    registry: &mut PackageRegistry<'cfg>,
-    max_rust_version: Option<PartialVersion>,
+#[tracing::instrument(skip_all)]
+fn resolve_with_registry<'gctx>(
+    ws: &Workspace<'gctx>,
+    registry: &mut PackageRegistry<'gctx>,
+    dry_run: bool,
 ) -> CargoResult<Resolve> {
     let prev = ops::load_pkg_lockfile(ws)?;
     let mut resolve = resolve_with_previous(
@@ -252,11 +284,23 @@ fn resolve_with_registry<'cfg>(
         None,
         &[],
         true,
-        max_rust_version,
     )?;
 
-    if !ws.is_ephemeral() && ws.require_optional_deps() {
-        ops::write_pkg_lockfile(ws, &mut resolve)?;
+    let print = if !ws.is_ephemeral() && ws.require_optional_deps() {
+        if !dry_run {
+            ops::write_pkg_lockfile(ws, &mut resolve)?
+        } else {
+            true
+        }
+    } else {
+        // This mostly represents
+        // - `cargo install --locked` and the only change is the package is no longer local but
+        //   from the registry which is noise
+        // - publish of libraries
+        false
+    };
+    if print {
+        ops::print_lockfile_changes(ws, prev.as_ref(), &resolve, registry)?;
     }
     Ok(resolve)
 }
@@ -264,9 +308,10 @@ fn resolve_with_registry<'cfg>(
 /// Resolves all dependencies for a package using an optional previous instance
 /// of resolve to guide the resolution process.
 ///
-/// This also takes an optional hash set, `to_avoid`, which is a list of package
-/// IDs that should be avoided when consulting the previous instance of resolve
-/// (often used in pairings with updates).
+/// This also takes an optional filter `keep_previous`, which informs the `registry`
+/// which package ID should be locked to the previous instance of resolve
+/// (often used in pairings with updates). See comments in [`register_previous_locks`]
+/// for scenarios that might override this.
 ///
 /// The previous resolve normally comes from a lock file. This function does not
 /// read or write lock files from the filesystem.
@@ -276,167 +321,63 @@ fn resolve_with_registry<'cfg>(
 ///
 /// If `register_patches` is true, then entries from the `[patch]` table in
 /// the manifest will be added to the given `PackageRegistry`.
-pub fn resolve_with_previous<'cfg>(
-    registry: &mut PackageRegistry<'cfg>,
-    ws: &Workspace<'cfg>,
+#[tracing::instrument(skip_all)]
+pub fn resolve_with_previous<'gctx>(
+    registry: &mut PackageRegistry<'gctx>,
+    ws: &Workspace<'gctx>,
     cli_features: &CliFeatures,
     has_dev_units: HasDevUnits,
     previous: Option<&Resolve>,
-    to_avoid: Option<&HashSet<PackageId>>,
+    keep_previous: Option<Keep<'_>>,
     specs: &[PackageIdSpec],
     register_patches: bool,
-    max_rust_version: Option<PartialVersion>,
 ) -> CargoResult<Resolve> {
     // We only want one Cargo at a time resolving a crate graph since this can
     // involve a lot of frobbing of the global caches.
-    let _lock = ws.config().acquire_package_cache_lock()?;
+    let _lock = ws
+        .gctx()
+        .acquire_package_cache_lock(CacheLockMode::DownloadExclusive)?;
 
-    // Here we place an artificial limitation that all non-registry sources
-    // cannot be locked at more than one revision. This means that if a Git
-    // repository provides more than one package, they must all be updated in
-    // step when any of them are updated.
-    //
-    // TODO: this seems like a hokey reason to single out the registry as being
-    // different.
-    let to_avoid_sources: HashSet<SourceId> = to_avoid
-        .map(|set| {
-            set.iter()
-                .map(|p| p.source_id())
-                .filter(|s| !s.is_registry())
-                .collect()
-        })
-        .unwrap_or_default();
+    // Some packages are already loaded when setting up a workspace. This
+    // makes it so anything that was already loaded will not be loaded again.
+    // Without this there were cases where members would be parsed multiple times
+    ws.preload(registry);
 
-    let pre_patch_keep = |p: &PackageId| {
-        !to_avoid_sources.contains(&p.source_id())
-            && match to_avoid {
-                Some(set) => !set.contains(p),
-                None => true,
-            }
-    };
+    // In case any members were not already loaded or the Workspace is_ephemeral.
+    for member in ws.members() {
+        registry.add_sources(Some(member.package_id().source_id()))?;
+    }
+
+    // Try to keep all from previous resolve if no instruction given.
+    let keep_previous = keep_previous.unwrap_or(&|_| true);
 
     // While registering patches, we will record preferences for particular versions
     // of various packages.
     let mut version_prefs = VersionPreferences::default();
-
-    // This is a set of PackageIds of `[patch]` entries, and some related locked PackageIds, for
-    // which locking should be avoided (but which will be preferred when searching dependencies,
-    // via prefer_patch_deps below)
-    let mut avoid_patch_ids = HashSet::new();
-
-    if register_patches {
-        for (url, patches) in ws.root_patch()?.iter() {
-            for patch in patches {
-                version_prefs.prefer_dependency(patch.clone());
-            }
-            let previous = match previous {
-                Some(r) => r,
-                None => {
-                    let patches: Vec<_> = patches.iter().map(|p| (p, None)).collect();
-                    let unlock_ids = registry.patch(url, &patches)?;
-                    // Since nothing is locked, this shouldn't possibly return anything.
-                    assert!(unlock_ids.is_empty());
-                    continue;
-                }
-            };
-
-            // This is a list of pairs where the first element of the pair is
-            // the raw `Dependency` which matches what's listed in `Cargo.toml`.
-            // The second element is, if present, the "locked" version of
-            // the `Dependency` as well as the `PackageId` that it previously
-            // resolved to. This second element is calculated by looking at the
-            // previous resolve graph, which is primarily what's done here to
-            // build the `registrations` list.
-            let mut registrations = Vec::new();
-            for dep in patches {
-                let candidates = || {
-                    previous
-                        .iter()
-                        .chain(previous.unused_patches().iter().cloned())
-                        .filter(&pre_patch_keep)
-                };
-
-                let lock = match candidates().find(|id| dep.matches_id(*id)) {
-                    // If we found an exactly matching candidate in our list of
-                    // candidates, then that's the one to use.
-                    Some(package_id) => {
-                        let mut locked_dep = dep.clone();
-                        locked_dep.lock_to(package_id);
-                        Some(LockedPatchDependency {
-                            dependency: locked_dep,
-                            package_id,
-                            alt_package_id: None,
-                        })
-                    }
-                    None => {
-                        // If the candidate does not have a matching source id
-                        // then we may still have a lock candidate. If we're
-                        // loading a v2-encoded resolve graph and `dep` is a
-                        // git dep with `branch = 'master'`, then this should
-                        // also match candidates without `branch = 'master'`
-                        // (which is now treated separately in Cargo).
-                        //
-                        // In this scenario we try to convert candidates located
-                        // in the resolve graph to explicitly having the
-                        // `master` branch (if they otherwise point to
-                        // `DefaultBranch`). If this works and our `dep`
-                        // matches that then this is something we'll lock to.
-                        match candidates().find(|&id| {
-                            match master_branch_git_source(id, previous) {
-                                Some(id) => dep.matches_id(id),
-                                None => false,
-                            }
-                        }) {
-                            Some(id_using_default) => {
-                                let id_using_master = id_using_default.with_source_id(
-                                    dep.source_id().with_precise(
-                                        id_using_default
-                                            .source_id()
-                                            .precise()
-                                            .map(|s| s.to_string()),
-                                    ),
-                                );
-
-                                let mut locked_dep = dep.clone();
-                                locked_dep.lock_to(id_using_master);
-                                Some(LockedPatchDependency {
-                                    dependency: locked_dep,
-                                    package_id: id_using_master,
-                                    // Note that this is where the magic
-                                    // happens, where the resolve graph
-                                    // probably has locks pointing to
-                                    // DefaultBranch sources, and by including
-                                    // this here those will get transparently
-                                    // rewritten to Branch("master") which we
-                                    // have a lock entry for.
-                                    alt_package_id: Some(id_using_default),
-                                })
-                            }
-
-                            // No locked candidate was found
-                            None => None,
-                        }
-                    }
-                };
-
-                registrations.push((dep, lock));
-            }
-
-            let canonical = CanonicalUrl::new(url)?;
-            for (orig_patch, unlock_id) in registry.patch(url, &registrations)? {
-                // Avoid the locked patch ID.
-                avoid_patch_ids.insert(unlock_id);
-                // Also avoid the thing it is patching.
-                avoid_patch_ids.extend(previous.iter().filter(|id| {
-                    orig_patch.matches_ignoring_source(*id)
-                        && *id.source_id().canonical_url() == canonical
-                }));
-            }
-        }
+    if ws.gctx().cli_unstable().minimal_versions {
+        version_prefs.version_ordering(VersionOrdering::MinimumVersionsFirst)
     }
-    debug!("avoid_patch_ids={:?}", avoid_patch_ids);
+    if ws.resolve_honors_rust_version() {
+        let mut rust_versions: Vec<_> = ws
+            .members()
+            .filter_map(|p| p.rust_version().map(|rv| rv.as_partial().clone()))
+            .collect();
+        if rust_versions.is_empty() {
+            let rustc = ws.gctx().load_global_rustc(Some(ws))?;
+            let rust_version: PartialVersion = rustc.version.clone().into();
+            rust_versions.push(rust_version);
+        }
+        version_prefs.rust_versions(rust_versions);
+    }
 
-    let keep = |p: &PackageId| pre_patch_keep(p) && !avoid_patch_ids.contains(p);
+    let avoid_patch_ids = if register_patches {
+        register_patch_entries(registry, ws, previous, &mut version_prefs, keep_previous)?
+    } else {
+        HashSet::new()
+    };
+
+    // Refine `keep` with patches that should avoid locking.
+    let keep = |p: &PackageId| keep_previous(p) && !avoid_patch_ids.contains(p);
 
     let dev_deps = ws.require_optional_deps() || has_dev_units == HasDevUnits::Yes;
 
@@ -449,6 +390,7 @@ pub fn resolve_with_previous<'cfg>(
         register_previous_locks(ws, registry, r, &keep, dev_deps);
 
         // Prefer to use anything in the previous lock file, aka we want to have conservative updates.
+        let _span = tracing::span!(tracing::Level::TRACE, "prefer_package_id").entered();
         for id in r.iter().filter(keep) {
             debug!("attempting to prefer {}", id);
             version_prefs.prefer_package_id(id);
@@ -459,68 +401,36 @@ pub fn resolve_with_previous<'cfg>(
         registry.lock_patches();
     }
 
-    // Some packages are already loaded when setting up a workspace. This
-    // makes it so anything that was already loaded will not be loaded again.
-    // Without this there were cases where members would be parsed multiple times
-    ws.preload(registry);
-
-    // In case any members were not already loaded or the Workspace is_ephemeral.
-    for member in ws.members() {
-        registry.add_sources(Some(member.package_id().source_id()))?;
-    }
-
-    let summaries: Vec<(Summary, ResolveOpts)> = ws
-        .members_with_features(specs, cli_features)?
-        .into_iter()
-        .map(|(member, features)| {
-            let summary = registry.lock(member.summary().clone());
-            (
-                summary,
-                ResolveOpts {
-                    dev_deps,
-                    features: RequestedFeatures::CliFeatures(features),
-                },
-            )
-        })
-        .collect();
-
-    let root_replace = ws.root_replace();
-
-    let replace = match previous {
-        Some(r) => root_replace
-            .iter()
-            .map(|&(ref spec, ref dep)| {
-                for (&key, &val) in r.replacements().iter() {
-                    if spec.matches(key) && dep.matches_id(val) && keep(&val) {
-                        let mut dep = dep.clone();
-                        dep.lock_to(val);
-                        return (spec.clone(), dep);
-                    }
-                }
-                (spec.clone(), dep.clone())
+    let summaries: Vec<(Summary, ResolveOpts)> = {
+        let _span = tracing::span!(tracing::Level::TRACE, "registry.lock").entered();
+        ws.members_with_features(specs, cli_features)?
+            .into_iter()
+            .map(|(member, features)| {
+                let summary = registry.lock(member.summary().clone());
+                (
+                    summary,
+                    ResolveOpts {
+                        dev_deps,
+                        features: RequestedFeatures::CliFeatures(features),
+                    },
+                )
             })
-            .collect::<Vec<_>>(),
-        None => root_replace.to_vec(),
+            .collect()
     };
 
-    ws.preload(registry);
+    let replace = lock_replacements(ws, previous, &keep);
+
     let mut resolved = resolver::resolve(
         &summaries,
         &replace,
         registry,
         &version_prefs,
-        Some(ws.config()),
-        ws.unstable_features()
-            .require(Feature::public_dependency())
-            .is_ok(),
-        max_rust_version,
+        ResolveVersion::with_rust_version(ws.lowest_rust_version()),
+        Some(ws.gctx()),
     )?;
-    let patches: Vec<_> = registry
-        .patches()
-        .values()
-        .flat_map(|v| v.iter().cloned())
-        .collect();
-    resolved.register_used_patches(&patches[..]);
+
+    let patches = registry.patches().values().flat_map(|v| v.iter());
+    resolved.register_used_patches(patches);
 
     if register_patches && !resolved.unused_patches().is_empty() {
         emit_warnings_of_unused_patches(ws, &resolved, registry)?;
@@ -529,32 +439,35 @@ pub fn resolve_with_previous<'cfg>(
     if let Some(previous) = previous {
         resolved.merge_from(previous)?;
     }
+    let gctx = ws.gctx();
+    let mut deferred = gctx.deferred_global_last_use()?;
+    deferred.save_no_error(gctx);
     Ok(resolved)
 }
 
 /// Read the `paths` configuration variable to discover all path overrides that
 /// have been configured.
+#[tracing::instrument(skip_all)]
 pub fn add_overrides<'a>(
     registry: &mut PackageRegistry<'a>,
     ws: &Workspace<'a>,
 ) -> CargoResult<()> {
-    let config = ws.config();
-    let paths = match config.get_list("paths")? {
-        Some(list) => list,
-        None => return Ok(()),
+    let gctx = ws.gctx();
+    let Some(paths) = gctx.get_list("paths")? else {
+        return Ok(());
     };
 
     let paths = paths.val.iter().map(|(s, def)| {
         // The path listed next to the string is the config file in which the
         // key was located, so we want to pop off the `.cargo/config` component
         // to get the directory containing the `.cargo` folder.
-        (def.root(config).join(s), def)
+        (paths::normalize_path(&def.root(gctx).join(s)), def)
     });
 
     for (path, definition) in paths {
         let id = SourceId::for_path(&path)?;
-        let mut source = PathSource::new_recursive(&path, id, ws.config());
-        source.update().with_context(|| {
+        let mut source = RecursivePathSource::new(&path, id, ws.gctx());
+        source.load().with_context(|| {
             format!(
                 "failed to update path override `{}` \
                  (defined in `{}`)",
@@ -567,10 +480,10 @@ pub fn add_overrides<'a>(
     Ok(())
 }
 
-pub fn get_resolved_packages<'cfg>(
+pub fn get_resolved_packages<'gctx>(
     resolve: &Resolve,
-    registry: PackageRegistry<'cfg>,
-) -> CargoResult<PackageSet<'cfg>> {
+    registry: PackageRegistry<'gctx>,
+) -> CargoResult<PackageSet<'gctx>> {
     let ids: Vec<PackageId> = resolve.iter().collect();
     registry.get(&ids)
 }
@@ -591,11 +504,12 @@ pub fn get_resolved_packages<'cfg>(
 ///
 /// Note that this function, at the time of this writing, is basically the
 /// entire fix for issue #4127.
+#[tracing::instrument(skip_all)]
 fn register_previous_locks(
     ws: &Workspace<'_>,
     registry: &mut PackageRegistry<'_>,
     resolve: &Resolve,
-    keep: &dyn Fn(&PackageId) -> bool,
+    keep: Keep<'_>,
     dev_deps: bool,
 ) {
     let path_pkg = |id: SourceId| {
@@ -632,23 +546,11 @@ fn register_previous_locks(
     // however, nothing else in the dependency graph depends on `log` and the
     // newer version of `serde` requires a new version of `log` it'll get pulled
     // in (as we didn't accidentally lock it to an old version).
-    //
-    // Additionally, here we process all path dependencies listed in the previous
-    // resolve. They can not only have their dependencies change but also
-    // the versions of the package change as well. If this ends up happening
-    // then we want to make sure we don't lock a package ID node that doesn't
-    // actually exist. Note that we don't do transitive visits of all the
-    // package's dependencies here as that'll be covered below to poison those
-    // if they changed.
     let mut avoid_locking = HashSet::new();
     registry.add_to_yanked_whitelist(resolve.iter().filter(keep));
     for node in resolve.iter() {
         if !keep(&node) {
             add_deps(resolve, node, &mut avoid_locking);
-        } else if let Some(pkg) = path_pkg(node.source_id()) {
-            if pkg.package_id() != node {
-                avoid_locking.insert(node);
-            }
         }
     }
 
@@ -683,60 +585,81 @@ fn register_previous_locks(
     // crates from crates.io* are not locked (aka added to `avoid_locking`).
     // For dependencies like `log` their previous version in the lock file will
     // come up first before newer version, if newer version are available.
-    let mut path_deps = ws.members().cloned().collect::<Vec<_>>();
-    let mut visited = HashSet::new();
-    while let Some(member) = path_deps.pop() {
-        if !visited.insert(member.package_id()) {
-            continue;
+    {
+        let _span = tracing::span!(tracing::Level::TRACE, "poison").entered();
+        let mut path_deps = ws.members().cloned().collect::<Vec<_>>();
+        let mut visited = HashSet::new();
+        while let Some(member) = path_deps.pop() {
+            if !visited.insert(member.package_id()) {
+                continue;
+            }
+            let is_ws_member = ws.is_member(&member);
+            for dep in member.dependencies() {
+                // If this dependency didn't match anything special then we may want
+                // to poison the source as it may have been added. If this path
+                // dependencies is **not** a workspace member, however, and it's an
+                // optional/non-transitive dependency then it won't be necessarily
+                // be in our lock file. If this shows up then we avoid poisoning
+                // this source as otherwise we'd repeatedly update the registry.
+                //
+                // TODO: this breaks adding an optional dependency in a
+                // non-workspace member and then simultaneously editing the
+                // dependency on that crate to enable the feature. For now,
+                // this bug is better than the always-updating registry though.
+                if !is_ws_member && (dep.is_optional() || !dep.is_transitive()) {
+                    continue;
+                }
+
+                // If dev-dependencies aren't being resolved, skip them.
+                if !dep.is_transitive() && !dev_deps {
+                    continue;
+                }
+
+                // If this is a path dependency, then try to push it onto our
+                // worklist.
+                if let Some(pkg) = path_pkg(dep.source_id()) {
+                    path_deps.push(pkg);
+                    continue;
+                }
+
+                // If we match *anything* in the dependency graph then we consider
+                // ourselves all ok, and assume that we'll resolve to that.
+                if resolve.iter().any(|id| dep.matches_ignoring_source(id)) {
+                    continue;
+                }
+
+                // Ok if nothing matches, then we poison the source of these
+                // dependencies and the previous lock file.
+                debug!(
+                    "poisoning {} because {} looks like it changed {}",
+                    dep.source_id(),
+                    member.package_id(),
+                    dep.package_name()
+                );
+                for id in resolve
+                    .iter()
+                    .filter(|id| id.source_id() == dep.source_id())
+                {
+                    add_deps(resolve, id, &mut avoid_locking);
+                }
+            }
         }
-        let is_ws_member = ws.is_member(&member);
-        for dep in member.dependencies() {
-            // If this dependency didn't match anything special then we may want
-            // to poison the source as it may have been added. If this path
-            // dependencies is **not** a workspace member, however, and it's an
-            // optional/non-transitive dependency then it won't be necessarily
-            // be in our lock file. If this shows up then we avoid poisoning
-            // this source as otherwise we'd repeatedly update the registry.
-            //
-            // TODO: this breaks adding an optional dependency in a
-            // non-workspace member and then simultaneously editing the
-            // dependency on that crate to enable the feature. For now,
-            // this bug is better than the always-updating registry though.
-            if !is_ws_member && (dep.is_optional() || !dep.is_transitive()) {
-                continue;
-            }
+    }
 
-            // If dev-dependencies aren't being resolved, skip them.
-            if !dep.is_transitive() && !dev_deps {
-                continue;
-            }
-
-            // If this is a path dependency, then try to push it onto our
-            // worklist.
-            if let Some(pkg) = path_pkg(dep.source_id()) {
-                path_deps.push(pkg);
-                continue;
-            }
-
-            // If we match *anything* in the dependency graph then we consider
-            // ourselves all ok, and assume that we'll resolve to that.
-            if resolve.iter().any(|id| dep.matches_ignoring_source(id)) {
-                continue;
-            }
-
-            // Ok if nothing matches, then we poison the source of these
-            // dependencies and the previous lock file.
-            debug!(
-                "poisoning {} because {} looks like it changed {}",
-                dep.source_id(),
-                member.package_id(),
-                dep.package_name()
-            );
-            for id in resolve
-                .iter()
-                .filter(|id| id.source_id() == dep.source_id())
-            {
-                add_deps(resolve, id, &mut avoid_locking);
+    // Additionally, here we process all path dependencies listed in the previous
+    // resolve. They can not only have their dependencies change but also
+    // the versions of the package change as well. If this ends up happening
+    // then we want to make sure we don't lock a package ID node that doesn't
+    // actually exist. Note that we don't do transitive visits of all the
+    // package's dependencies here as that'll be covered below to poison those
+    // if they changed.
+    //
+    // This must come after all other `add_deps` calls to ensure it recursively walks the tree when
+    // called.
+    for node in resolve.iter() {
+        if let Some(pkg) = path_pkg(node.source_id()) {
+            if pkg.package_id() != node {
+                avoid_locking.insert(node);
             }
         }
     }
@@ -748,28 +671,31 @@ fn register_previous_locks(
     let keep = |id: &PackageId| keep(id) && !avoid_locking.contains(id);
 
     registry.clear_lock();
-    for node in resolve.iter().filter(keep) {
-        let deps = resolve
-            .deps_not_replaced(node)
-            .map(|p| p.0)
-            .filter(keep)
-            .collect::<Vec<_>>();
+    {
+        let _span = tracing::span!(tracing::Level::TRACE, "register_lock").entered();
+        for node in resolve.iter().filter(keep) {
+            let deps = resolve
+                .deps_not_replaced(node)
+                .map(|p| p.0)
+                .filter(keep)
+                .collect::<Vec<_>>();
 
-        // In the v2 lockfile format and prior the `branch=master` dependency
-        // directive was serialized the same way as the no-branch-listed
-        // directive. Nowadays in Cargo, however, these two directives are
-        // considered distinct and are no longer represented the same way. To
-        // maintain compatibility with older lock files we register locked nodes
-        // for *both* the master branch and the default branch.
-        //
-        // Note that this is only applicable for loading older resolves now at
-        // this point. All new lock files are encoded as v3-or-later, so this is
-        // just compat for loading an old lock file successfully.
-        if let Some(node) = master_branch_git_source(node, resolve) {
-            registry.register_lock(node, deps.clone());
+            // In the v2 lockfile format and prior the `branch=master` dependency
+            // directive was serialized the same way as the no-branch-listed
+            // directive. Nowadays in Cargo, however, these two directives are
+            // considered distinct and are no longer represented the same way. To
+            // maintain compatibility with older lock files we register locked nodes
+            // for *both* the master branch and the default branch.
+            //
+            // Note that this is only applicable for loading older resolves now at
+            // this point. All new lock files are encoded as v3-or-later, so this is
+            // just compat for loading an old lock file successfully.
+            if let Some(node) = master_branch_git_source(node, resolve) {
+                registry.register_lock(node, deps.clone());
+            }
+
+            registry.register_lock(node, deps);
         }
-
-        registry.register_lock(node, deps);
     }
 
     /// Recursively add `node` and all its transitive dependencies to `set`.
@@ -791,7 +717,7 @@ fn master_branch_git_source(id: PackageId, resolve: &Resolve) -> Option<PackageI
             let new_source =
                 SourceId::for_git(source.url(), GitReference::Branch("master".to_string()))
                     .unwrap()
-                    .with_precise(source.precise().map(|s| s.to_string()));
+                    .with_precise_from(source);
             return Some(id.with_source_id(new_source));
         }
     }
@@ -854,7 +780,7 @@ fn emit_warnings_of_unused_patches(
                 for id in ids.iter() {
                     write!(msg, "\n    {}", id.display_registry_name())?;
                 }
-                ws.config().shell().warn(msg)?;
+                ws.gctx().shell().warn(msg)?;
             }
             _ => unemitted_unused_patches.push(unused),
         }
@@ -866,10 +792,155 @@ fn emit_warnings_of_unused_patches(
             .iter()
             .map(|pkgid| format!("Patch `{}` {}", pkgid, MESSAGE))
             .collect();
-        ws.config()
+        ws.gctx()
             .shell()
             .warn(format!("{}\n{}", warnings.join("\n"), UNUSED_PATCH_WARNING))?;
     }
 
     return Ok(());
+}
+
+/// Informs `registry` and `version_pref` that `[patch]` entries are available
+/// and preferable for the dependency resolution.
+///
+/// This returns a set of PackageIds of `[patch]` entries, and some related
+/// locked PackageIds, for which locking should be avoided (but which will be
+/// preferred when searching dependencies, via [`VersionPreferences::prefer_patch_deps`]).
+#[tracing::instrument(level = "debug", skip_all, ret)]
+fn register_patch_entries(
+    registry: &mut PackageRegistry<'_>,
+    ws: &Workspace<'_>,
+    previous: Option<&Resolve>,
+    version_prefs: &mut VersionPreferences,
+    keep_previous: Keep<'_>,
+) -> CargoResult<HashSet<PackageId>> {
+    let mut avoid_patch_ids = HashSet::new();
+    for (url, patches) in ws.root_patch()?.iter() {
+        for patch in patches {
+            version_prefs.prefer_dependency(patch.clone());
+        }
+        let Some(previous) = previous else {
+            let patches: Vec<_> = patches.iter().map(|p| (p, None)).collect();
+            let unlock_ids = registry.patch(url, &patches)?;
+            // Since nothing is locked, this shouldn't possibly return anything.
+            assert!(unlock_ids.is_empty());
+            continue;
+        };
+
+        // This is a list of pairs where the first element of the pair is
+        // the raw `Dependency` which matches what's listed in `Cargo.toml`.
+        // The second element is, if present, the "locked" version of
+        // the `Dependency` as well as the `PackageId` that it previously
+        // resolved to. This second element is calculated by looking at the
+        // previous resolve graph, which is primarily what's done here to
+        // build the `registrations` list.
+        let mut registrations = Vec::new();
+        for dep in patches {
+            let candidates = || {
+                previous
+                    .iter()
+                    .chain(previous.unused_patches().iter().cloned())
+                    .filter(&keep_previous)
+            };
+
+            let lock = match candidates().find(|id| dep.matches_id(*id)) {
+                // If we found an exactly matching candidate in our list of
+                // candidates, then that's the one to use.
+                Some(package_id) => {
+                    let mut locked_dep = dep.clone();
+                    locked_dep.lock_to(package_id);
+                    Some(LockedPatchDependency {
+                        dependency: locked_dep,
+                        package_id,
+                        alt_package_id: None,
+                    })
+                }
+                None => {
+                    // If the candidate does not have a matching source id
+                    // then we may still have a lock candidate. If we're
+                    // loading a v2-encoded resolve graph and `dep` is a
+                    // git dep with `branch = 'master'`, then this should
+                    // also match candidates without `branch = 'master'`
+                    // (which is now treated separately in Cargo).
+                    //
+                    // In this scenario we try to convert candidates located
+                    // in the resolve graph to explicitly having the
+                    // `master` branch (if they otherwise point to
+                    // `DefaultBranch`). If this works and our `dep`
+                    // matches that then this is something we'll lock to.
+                    match candidates().find(|&id| match master_branch_git_source(id, previous) {
+                        Some(id) => dep.matches_id(id),
+                        None => false,
+                    }) {
+                        Some(id_using_default) => {
+                            let id_using_master = id_using_default.with_source_id(
+                                dep.source_id()
+                                    .with_precise_from(id_using_default.source_id()),
+                            );
+
+                            let mut locked_dep = dep.clone();
+                            locked_dep.lock_to(id_using_master);
+                            Some(LockedPatchDependency {
+                                dependency: locked_dep,
+                                package_id: id_using_master,
+                                // Note that this is where the magic
+                                // happens, where the resolve graph
+                                // probably has locks pointing to
+                                // DefaultBranch sources, and by including
+                                // this here those will get transparently
+                                // rewritten to Branch("master") which we
+                                // have a lock entry for.
+                                alt_package_id: Some(id_using_default),
+                            })
+                        }
+
+                        // No locked candidate was found
+                        None => None,
+                    }
+                }
+            };
+
+            registrations.push((dep, lock));
+        }
+
+        let canonical = CanonicalUrl::new(url)?;
+        for (orig_patch, unlock_id) in registry.patch(url, &registrations)? {
+            // Avoid the locked patch ID.
+            avoid_patch_ids.insert(unlock_id);
+            // Also avoid the thing it is patching.
+            avoid_patch_ids.extend(previous.iter().filter(|id| {
+                orig_patch.matches_ignoring_source(*id)
+                    && *id.source_id().canonical_url() == canonical
+            }));
+        }
+    }
+
+    Ok(avoid_patch_ids)
+}
+
+/// Locks each `[replace]` entry to a specific Package ID
+/// if the lockfile contains any corresponding previous replacement.
+fn lock_replacements(
+    ws: &Workspace<'_>,
+    previous: Option<&Resolve>,
+    keep: Keep<'_>,
+) -> Vec<(PackageIdSpec, Dependency)> {
+    let root_replace = ws.root_replace();
+    let replace = match previous {
+        Some(r) => root_replace
+            .iter()
+            .map(|(spec, dep)| {
+                for (&key, &val) in r.replacements().iter() {
+                    if spec.matches(key) && dep.matches_id(val) && keep(&val) {
+                        let mut dep = dep.clone();
+                        dep.lock_to(val);
+                        return (spec.clone(), dep);
+                    }
+                }
+                (spec.clone(), dep.clone())
+            })
+            .collect::<Vec<_>>(),
+        None => root_replace.to_vec(),
+    };
+    replace
 }

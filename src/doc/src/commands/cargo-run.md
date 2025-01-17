@@ -1,5 +1,4 @@
 # cargo-run(1)
-
 ## NAME
 
 cargo-run --- Run the current package
@@ -36,7 +35,6 @@ format.</dd>
 
 
 </dl>
-
 
 ### Target Selection
 
@@ -85,7 +83,6 @@ be specified multiple times, which enables all specified features.</dd>
 
 </dl>
 
-
 ### Compilation Options
 
 <dl>
@@ -98,8 +95,7 @@ list of supported targets.</p>
 <a href="../reference/config.html">config value</a>.</p>
 <p>Note that specifying this flag makes Cargo run in a different mode where the
 target artifacts are placed in a separate directory. See the
-<a href="../guide/build-cache.html">build cache</a> documentation for more details.</dd>
-
+<a href="../reference/build-cache.html">build cache</a> documentation for more details.</dd>
 
 
 <dt class="option-term" id="option-cargo-run--r"><a class="option-anchor" href="#option-cargo-run--r"></a><code>-r</code></dt>
@@ -108,17 +104,9 @@ target artifacts are placed in a separate directory. See the
 See also the <code>--profile</code> option for choosing a specific profile by name.</dd>
 
 
-
 <dt class="option-term" id="option-cargo-run---profile"><a class="option-anchor" href="#option-cargo-run---profile"></a><code>--profile</code> <em>name</em></dt>
 <dd class="option-desc">Run with the given profile.
-See the <a href="../reference/profiles.html">the reference</a> for more details on profiles.</dd>
-
-
-
-<dt class="option-term" id="option-cargo-run---ignore-rust-version"><a class="option-anchor" href="#option-cargo-run---ignore-rust-version"></a><code>--ignore-rust-version</code></dt>
-<dd class="option-desc">Run the target even if the selected Rust compiler is older than the
-required Rust version as configured in the project’s <code>rust-version</code> field.</dd>
-
+See <a href="../reference/profiles.html">the reference</a> for more details on profiles.</dd>
 
 
 <dt class="option-term" id="option-cargo-run---timings=fmts"><a class="option-anchor" href="#option-cargo-run---timings=fmts"></a><code>--timings=</code><em>fmts</em></dt>
@@ -139,7 +127,6 @@ information about timing information.</li>
 
 
 
-
 </dl>
 
 ### Output Options
@@ -150,7 +137,6 @@ information about timing information.</li>
 specified with the <code>CARGO_TARGET_DIR</code> environment variable, or the
 <code>build.target-dir</code> <a href="../reference/config.html">config value</a>.
 Defaults to <code>target</code> in the root of the workspace.</dd>
-
 
 </dl>
 
@@ -185,7 +171,6 @@ terminal.</li>
 <a href="../reference/config.html">config value</a>.</dd>
 
 
-
 <dt class="option-term" id="option-cargo-run---message-format"><a class="option-anchor" href="#option-cargo-run---message-format"></a><code>--message-format</code> <em>fmt</em></dt>
 <dd class="option-desc">The output format for diagnostic messages. Can be specified multiple times
 and consists of comma-separated values. Valid values:</p>
@@ -209,7 +194,6 @@ coming from rustc are still emitted. Cannot be used with <code>human</code> or <
 </ul></dd>
 
 
-
 </dl>
 
 ### Manifest Options
@@ -221,16 +205,20 @@ coming from rustc are still emitted. Cannot be used with <code>human</code> or <
 <code>Cargo.toml</code> file in the current directory or any parent directory.</dd>
 
 
+<dt class="option-term" id="option-cargo-run---ignore-rust-version"><a class="option-anchor" href="#option-cargo-run---ignore-rust-version"></a><code>--ignore-rust-version</code></dt>
+<dd class="option-desc">Ignore <code>rust-version</code> specification in packages.</dd>
 
-<dt class="option-term" id="option-cargo-run---frozen"><a class="option-anchor" href="#option-cargo-run---frozen"></a><code>--frozen</code></dt>
+
 <dt class="option-term" id="option-cargo-run---locked"><a class="option-anchor" href="#option-cargo-run---locked"></a><code>--locked</code></dt>
-<dd class="option-desc">Either of these flags requires that the <code>Cargo.lock</code> file is
-up-to-date. If the lock file is missing, or it needs to be updated, Cargo will
-exit with an error. The <code>--frozen</code> flag also prevents Cargo from
-attempting to access the network to determine if it is out-of-date.</p>
-<p>These may be used in environments where you want to assert that the
-<code>Cargo.lock</code> file is up-to-date (such as a CI build) or want to avoid network
-access.</dd>
+<dd class="option-desc">Asserts that the exact same dependencies and versions are used as when the
+existing <code>Cargo.lock</code> file was originally generated. Cargo will exit with an
+error when either of the following scenarios arises:</p>
+<ul>
+<li>The lock file is missing.</li>
+<li>Cargo attempted to change the lock file due to a different dependency resolution.</li>
+</ul>
+<p>It may be used in environments where deterministic builds are desired,
+such as in CI pipelines.</dd>
 
 
 <dt class="option-term" id="option-cargo-run---offline"><a class="option-anchor" href="#option-cargo-run---offline"></a><code>--offline</code></dt>
@@ -245,6 +233,21 @@ See the <a href="cargo-fetch.html">cargo-fetch(1)</a> command to download depend
 offline.</p>
 <p>May also be specified with the <code>net.offline</code> <a href="../reference/config.html">config value</a>.</dd>
 
+
+<dt class="option-term" id="option-cargo-run---frozen"><a class="option-anchor" href="#option-cargo-run---frozen"></a><code>--frozen</code></dt>
+<dd class="option-desc">Equivalent to specifying both <code>--locked</code> and <code>--offline</code>.</dd>
+
+
+<dt class="option-term" id="option-cargo-run---lockfile-path"><a class="option-anchor" href="#option-cargo-run---lockfile-path"></a><code>--lockfile-path</code> <em>PATH</em></dt>
+<dd class="option-desc">Changes the path of the lockfile from the default (<code>&lt;workspace_root&gt;/Cargo.lock</code>) to <em>PATH</em>. <em>PATH</em> must end with
+<code>Cargo.lock</code> (e.g. <code>--lockfile-path /tmp/temporary-lockfile/Cargo.lock</code>). Note that providing
+<code>--lockfile-path</code> will ignore existing lockfile at the default path, and instead will
+either use the lockfile from <em>PATH</em>, or write a new lockfile into the provided <em>PATH</em> if it doesn’t exist.
+This flag can be used to run most commands in read-only directories, writing lockfile into the provided <em>PATH</em>.</p>
+<p>This option is only available on the <a href="https://doc.rust-lang.org/book/appendix-07-nightly-rust.html">nightly
+channel</a> and
+requires the <code>-Z unstable-options</code> flag to enable (see
+<a href="https://github.com/rust-lang/cargo/issues/14421">#14421</a>).</dd>
 
 
 </dl>
@@ -289,7 +292,6 @@ requires the <code>-Z unstable-options</code> flag to enable (see
 
 </dl>
 
-
 ### Miscellaneous Options
 
 <dl>
@@ -302,7 +304,6 @@ parallel jobs to the number of logical CPUs plus provided value. If
 a string <code>default</code> is provided, it sets the value back to defaults.
 Should not be 0.</dd>
 
-
 <dt class="option-term" id="option-cargo-run---keep-going"><a class="option-anchor" href="#option-cargo-run---keep-going"></a><code>--keep-going</code></dt>
 <dd class="option-desc">Build as many crates in the dependency graph as possible, rather than aborting
 the build on the first one that fails to build.</p>
@@ -312,7 +313,6 @@ one that succeeds (depending on which one of the two builds Cargo picked to run
 first), whereas <code>cargo run -j1 --keep-going</code> would definitely run both
 builds, even if the one run first fails.</dd>
 
-
 </dl>
 
 ## ENVIRONMENT
@@ -320,12 +320,10 @@ builds, even if the one run first fails.</dd>
 See [the reference](../reference/environment-variables.html) for
 details on environment variables that Cargo reads.
 
-
 ## EXIT STATUS
 
 * `0`: Cargo succeeded.
 * `101`: Cargo failed to complete.
-
 
 ## EXAMPLES
 

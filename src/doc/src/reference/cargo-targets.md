@@ -1,4 +1,4 @@
-## Cargo Targets
+# Cargo Targets
 
 Cargo packages consist of *targets* which correspond to source files which can
 be compiled into a crate. Packages can have [library](#library),
@@ -10,13 +10,13 @@ by the [directory layout][package layout] of the source files.
 See [Configuring a target](#configuring-a-target) below for details on
 configuring the settings for a target.
 
-### Library
+## Library
 
 The library target defines a "library" that can be used and linked by other
 libraries and executables. The filename defaults to `src/lib.rs`, and the name
-of the library defaults to the name of the package. A package can have only
-one library. The settings for the library can be [customized] in the `[lib]`
-table in `Cargo.toml`.
+of the library defaults to the name of the package, with any dashes replaced
+with underscores. A package can have only one library. The settings for the
+library can be [customized] in the `[lib]` table in `Cargo.toml`.
 
 ```toml
 # Example of customizing the library in Cargo.toml.
@@ -25,13 +25,13 @@ crate-type = ["cdylib"]
 bench = false
 ```
 
-### Binaries
+## Binaries
 
 Binary targets are executable programs that can be run after being compiled.
-The default binary filename is `src/main.rs`, which defaults to the name of
-the package. Additional binaries are stored in the [`src/bin/`
-directory][package layout]. The settings for each binary can be [customized]
-in the `[[bin]]` tables in `Cargo.toml`.
+A binary's source can be `src/main.rs` and/or stored in the [`src/bin/`
+directory][package layout]. For `src/main.rs`, the default binary name is the
+package name. The settings for each binary can be [customized] in the`[[bin]]`
+tables in `Cargo.toml`.
 
 Binaries can use the public API of the package's library. They are also linked
 with the [`[dependencies]`][dependencies] defined in `Cargo.toml`.
@@ -52,7 +52,7 @@ name = "frobnicator"
 required-features = ["frobnicate"]
 ```
 
-### Examples
+## Examples
 
 Files located under the [`examples` directory][package layout] are example
 uses of the functionality provided by the library. When compiled, they are
@@ -81,7 +81,7 @@ default to protect them from bit-rotting. Set [the `test`
 field](#the-test-field) to `true` if you have `#[test]` functions in the
 example that you want to run with [`cargo test`].
 
-### Tests
+## Tests
 
 There are two styles of tests within a Cargo project:
 
@@ -108,7 +108,7 @@ strategy.
 [libtest harness]: ../../rustc/tests/index.html
 [cargo-test-documentation-tests]: ../commands/cargo-test.md#documentation-tests
 
-#### Integration tests
+### Integration tests
 
 Files located under the [`tests` directory][package layout] are integration
 tests. When you run [`cargo test`], Cargo will compile each of these files as
@@ -140,7 +140,7 @@ executable.
 [environment variable]: environment-variables.md#environment-variables-cargo-sets-for-crates
 [`env` macro]: ../../std/macro.env.html
 
-### Benchmarks
+## Benchmarks
 
 Benchmarks provide a way to test the performance of your code using the
 [`cargo bench`] command. They follow the same structure as [tests](#tests),
@@ -163,7 +163,7 @@ Similarly to tests:
 > may help with running benchmarks on the stable channel, such as
 > [Criterion](https://crates.io/crates/criterion).
 
-### Configuring a target
+## Configuring a target
 
 All of the  `[lib]`, `[[bin]]`, `[[example]]`, `[[test]]`, and `[[bench]]`
 sections in `Cargo.toml` support similar configuration for specifying how a
@@ -184,7 +184,6 @@ test = true            # Is tested by default.
 doctest = true         # Documentation examples are tested by default.
 bench = true           # Is benchmarked by default.
 doc = true             # Is documented by default.
-plugin = false         # Used as a compiler plugin (deprecated).
 proc-macro = false     # Set to `true` for a proc-macro library.
 harness = true         # Use libtest harness.
 edition = "2015"       # The edition of the target.
@@ -192,20 +191,21 @@ crate-type = ["lib"]   # The crate types to generate.
 required-features = [] # Features required to build this target (N/A for lib).
 ```
 
-#### The `name` field
+### The `name` field
 
 The `name` field specifies the name of the target, which corresponds to the
 filename of the artifact that will be generated. For a library, this is the
 crate name that dependencies will use to reference it.
 
-For the `[lib]` and the default binary (`src/main.rs`), this defaults to the
-name of the package, with any dashes replaced with underscores. For other
-[auto discovered](#target-auto-discovery) targets, it defaults to the
+For the library target, this defaults to the name of the package , with any
+dashes replaced with underscores. For the default binary (`src/main.rs`),
+it also defaults to the name of the package, with no replacement for dashes.
+For [auto discovered](#target-auto-discovery) targets, it defaults to the
 directory or file name.
 
 This is required for all targets except `[lib]`.
 
-#### The `path` field
+### The `path` field
 
 The `path` field specifies where the source for the crate is located, relative
 to the `Cargo.toml` file.
@@ -213,7 +213,7 @@ to the `Cargo.toml` file.
 If not specified, the [inferred path](#target-auto-discovery) is used based on
 the target name.
 
-#### The `test` field
+### The `test` field
 
 The `test` field indicates whether or not the target is tested by default by
 [`cargo test`]. The default is `true` for lib, bins, and tests.
@@ -223,19 +223,19 @@ The `test` field indicates whether or not the target is tested by default by
 > true` for an example will also build it as a test and run any
 > [`#[test]`][test-attribute] functions defined in the example.
 
-#### The `doctest` field
+### The `doctest` field
 
 The `doctest` field indicates whether or not [documentation examples] are
 tested by default by [`cargo test`]. This is only relevant for libraries, it
 has no effect on other sections. The default is `true` for the library.
 
-#### The `bench` field
+### The `bench` field
 
 The `bench` field indicates whether or not the target is benchmarked by
 default by [`cargo bench`]. The default is `true` for lib, bins, and
 benchmarks.
 
-#### The `doc` field
+### The `doc` field
 
 The `doc` field indicates whether or not the target is included in the
 documentation generated by [`cargo doc`] by default. The default is `true` for
@@ -244,17 +244,17 @@ libraries and binaries.
 > **Note**: The binary will be skipped if its name is the same as the lib
 > target.
 
-#### The `plugin` field
+### The `plugin` field
 
-This field is used for `rustc` plugins, which are being deprecated.
+This option is deprecated and unused.
 
-#### The `proc-macro` field
+### The `proc-macro` field
 
 The `proc-macro` field indicates that the library is a [procedural macro]
 ([reference][proc-macro-reference]). This is only valid for the `[lib]`
 target.
 
-#### The `harness` field
+### The `harness` field
 
 The `harness` field indicates that the [`--test` flag] will be passed to
 `rustc` which will automatically include the libtest library which is the
@@ -268,7 +268,7 @@ to run tests and benchmarks.
 Tests have the [`cfg(test)` conditional expression][cfg-test] enabled whether
 or not the harness is enabled.
 
-#### The `edition` field
+### The `edition` field
 
 The `edition` field defines the [Rust edition] the target will use. If not
 specified, it defaults to the [`edition` field][package-edition] for the
@@ -276,7 +276,7 @@ specified, it defaults to the [`edition` field][package-edition] for the
 advanced scenarios such as incrementally transitioning a large package to a
 new edition.
 
-#### The `crate-type` field
+### The `crate-type` field
 
 The `crate-type` field defines the [crate types] that will be generated by the
 target. It is an array of strings, allowing you to specify multiple crate
@@ -294,7 +294,7 @@ The available options are `bin`, `lib`, `rlib`, `dylib`, `cdylib`,
 `staticlib`, and `proc-macro`. You can read more about the different crate
 types in the [Rust Reference Manual][crate types].
 
-#### The `required-features` field
+### The `required-features` field
 
 The `required-features` field specifies which [features] the target needs in
 order to be built. If any of the required features are not enabled, the
@@ -314,7 +314,7 @@ required-features = ["postgres", "tools"]
 ```
 
 
-### Target auto-discovery
+## Target auto-discovery
 
 By default, Cargo automatically determines the targets to build based on the
 [layout of the files][package layout] on the filesystem. The target
@@ -323,13 +323,14 @@ configuration tables, such as `[lib]`, `[[bin]]`, `[[test]]`, `[[bench]]`, or
 standard directory layout.
 
 The automatic target discovery can be disabled so that only manually
-configured targets will be built. Setting the keys `autobins`, `autoexamples`,
+configured targets will be built. Setting the keys `autolib`, `autobins`, `autoexamples`,
 `autotests`, or `autobenches` to `false` in the `[package]` section will
 disable auto-discovery of the corresponding target type.
 
 ```toml
 [package]
 # ...
+autolib = false
 autobins = false
 autoexamples = false
 autotests = false
@@ -363,8 +364,11 @@ autobins = false
 > is `false` if at least one target is manually defined in `Cargo.toml`.
 > Beginning with the 2018 edition, the default is always `true`.
 
+> **MSRV:** Respected as of 1.27 for `autobins`, `autoexamples`, `autotests`, and `autobenches`
 
-[Build cache]: ../guide/build-cache.md
+> **MSRV:** Respected as of 1.83 for `autolib`
+
+[Build cache]: build-cache.md
 [Rust Edition]: ../../edition-guide/index.html
 [`--test` flag]: ../../rustc/command-line-arguments.html#option-test
 [`cargo bench`]: ../commands/cargo-bench.md

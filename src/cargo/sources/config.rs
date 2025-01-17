@@ -4,11 +4,13 @@
 //! structure usable by Cargo itself. Currently this is primarily used to map
 //! sources to one another via the `replace-with` key in `.cargo/config`.
 
-use crate::core::{GitReference, PackageId, Source, SourceId};
+use crate::core::{GitReference, PackageId, SourceId};
+use crate::sources::overlay::DependencyConfusionThreatOverlaySource;
+use crate::sources::source::Source;
 use crate::sources::{ReplacedSource, CRATES_IO_REGISTRY};
-use crate::util::config::{self, ConfigRelativePath, OptValue};
+use crate::util::context::{self, ConfigRelativePath, OptValue};
 use crate::util::errors::CargoResult;
-use crate::util::{Config, IntoUrl};
+use crate::util::{GlobalContext, IntoUrl};
 use anyhow::{bail, Context as _};
 use std::collections::{HashMap, HashSet};
 use tracing::debug;
@@ -18,12 +20,14 @@ use url::Url;
 ///
 /// [1]: https://doc.rust-lang.org/nightly/cargo/reference/config.html#source
 #[derive(Clone)]
-pub struct SourceConfigMap<'cfg> {
+pub struct SourceConfigMap<'gctx> {
     /// Mapping of source name to the toml configuration.
     cfgs: HashMap<String, SourceConfig>,
     /// Mapping of [`SourceId`] to the source name.
     id2name: HashMap<SourceId, String>,
-    config: &'cfg Config,
+    /// Mapping of sources to local registries that will be overlaid on them.
+    overlays: HashMap<SourceId, SourceId>,
+    gctx: &'gctx GlobalContext,
 }
 
 /// Definition of a source in a config file.
@@ -69,45 +73,58 @@ struct SourceConfig {
     replace_with: Option<(String, String)>,
 }
 
-impl<'cfg> SourceConfigMap<'cfg> {
+impl<'gctx> SourceConfigMap<'gctx> {
     /// Like [`SourceConfigMap::empty`] but includes sources from source
     /// replacement configurations.
-    pub fn new(config: &'cfg Config) -> CargoResult<SourceConfigMap<'cfg>> {
-        let mut base = SourceConfigMap::empty(config)?;
-        let sources: Option<HashMap<String, SourceConfigDef>> = config.get("source")?;
+    pub fn new(gctx: &'gctx GlobalContext) -> CargoResult<SourceConfigMap<'gctx>> {
+        let mut base = SourceConfigMap::empty(gctx)?;
+        let sources: Option<HashMap<String, SourceConfigDef>> = gctx.get("source")?;
         if let Some(sources) = sources {
             for (key, value) in sources.into_iter() {
                 base.add_config(key, value)?;
             }
         }
+
+        Ok(base)
+    }
+
+    /// Like [`SourceConfigMap::new`] but includes sources from source
+    /// replacement configurations.
+    pub fn new_with_overlays(
+        gctx: &'gctx GlobalContext,
+        overlays: impl IntoIterator<Item = (SourceId, SourceId)>,
+    ) -> CargoResult<SourceConfigMap<'gctx>> {
+        let mut base = SourceConfigMap::new(gctx)?;
+        base.overlays = overlays.into_iter().collect();
         Ok(base)
     }
 
     /// Creates the default set of sources that doesn't take `[source]`
     /// replacement into account.
-    pub fn empty(config: &'cfg Config) -> CargoResult<SourceConfigMap<'cfg>> {
+    pub fn empty(gctx: &'gctx GlobalContext) -> CargoResult<SourceConfigMap<'gctx>> {
         let mut base = SourceConfigMap {
             cfgs: HashMap::new(),
             id2name: HashMap::new(),
-            config,
+            overlays: HashMap::new(),
+            gctx,
         };
         base.add(
             CRATES_IO_REGISTRY,
             SourceConfig {
-                id: SourceId::crates_io(config)?,
+                id: SourceId::crates_io(gctx)?,
                 replace_with: None,
             },
         )?;
-        if SourceId::crates_io_is_sparse(config)? {
+        if SourceId::crates_io_is_sparse(gctx)? {
             base.add(
                 CRATES_IO_REGISTRY,
                 SourceConfig {
-                    id: SourceId::crates_io_maybe_sparse_http(config)?,
+                    id: SourceId::crates_io_maybe_sparse_http(gctx)?,
                     replace_with: None,
                 },
             )?;
         }
-        if let Ok(url) = config.get_env("__CARGO_TEST_CRATES_IO_URL_DO_NOT_USE_THIS") {
+        if let Ok(url) = gctx.get_env("__CARGO_TEST_CRATES_IO_URL_DO_NOT_USE_THIS") {
             base.add(
                 CRATES_IO_REGISTRY,
                 SourceConfig {
@@ -119,9 +136,9 @@ impl<'cfg> SourceConfigMap<'cfg> {
         Ok(base)
     }
 
-    /// Returns the `Config` this source config map is associated with.
-    pub fn config(&self) -> &'cfg Config {
-        self.config
+    /// Returns the [`GlobalContext`] this source config map is associated with.
+    pub fn gctx(&self) -> &'gctx GlobalContext {
+        self.gctx
     }
 
     /// Gets the [`Source`] for a given [`SourceId`].
@@ -131,42 +148,38 @@ impl<'cfg> SourceConfigMap<'cfg> {
         &self,
         id: SourceId,
         yanked_whitelist: &HashSet<PackageId>,
-    ) -> CargoResult<Box<dyn Source + 'cfg>> {
+    ) -> CargoResult<Box<dyn Source + 'gctx>> {
         debug!("loading: {}", id);
 
-        let mut name = match self.id2name.get(&id) {
-            Some(name) => name,
-            None => return id.load(self.config, yanked_whitelist),
+        let Some(mut name) = self.id2name.get(&id) else {
+            return self.load_overlaid(id, yanked_whitelist);
         };
         let mut cfg_loc = "";
         let orig_name = name;
         let new_id = loop {
-            let cfg = match self.cfgs.get(name) {
-                Some(cfg) => cfg,
-                None => {
-                    // Attempt to interpret the source name as an alt registry name
-                    if let Ok(alt_id) = SourceId::alt_registry(self.config, name) {
-                        debug!("following pointer to registry {}", name);
-                        break alt_id.with_precise(id.precise().map(str::to_string));
-                    }
-                    bail!(
-                        "could not find a configured source with the \
+            let Some(cfg) = self.cfgs.get(name) else {
+                // Attempt to interpret the source name as an alt registry name
+                if let Ok(alt_id) = SourceId::alt_registry(self.gctx, name) {
+                    debug!("following pointer to registry {}", name);
+                    break alt_id.with_precise_from(id);
+                }
+                bail!(
+                    "could not find a configured source with the \
                      name `{}` when attempting to lookup `{}` \
                      (configuration in `{}`)",
-                        name,
-                        orig_name,
-                        cfg_loc
-                    );
-                }
+                    name,
+                    orig_name,
+                    cfg_loc
+                );
             };
             match &cfg.replace_with {
                 Some((s, c)) => {
                     name = s;
                     cfg_loc = c;
                 }
-                None if id == cfg.id => return id.load(self.config, yanked_whitelist),
+                None if id == cfg.id => return self.load_overlaid(id, yanked_whitelist),
                 None => {
-                    break cfg.id.with_precise(id.precise().map(|s| s.to_string()));
+                    break cfg.id.with_precise_from(id);
                 }
             }
             debug!("following pointer to {}", name);
@@ -181,14 +194,14 @@ impl<'cfg> SourceConfigMap<'cfg> {
             }
         };
 
-        let new_src = new_id.load(
-            self.config,
+        let new_src = self.load_overlaid(
+            new_id,
             &yanked_whitelist
                 .iter()
                 .map(|p| p.map_source(id, new_id))
                 .collect(),
         )?;
-        let old_src = id.load(self.config, yanked_whitelist)?;
+        let old_src = id.load(self.gctx, yanked_whitelist)?;
         if !new_src.supports_checksums() && old_src.supports_checksums() {
             bail!(
                 "\
@@ -202,7 +215,7 @@ a lock file compatible with `{orig}` cannot be generated in this situation
             );
         }
 
-        if old_src.requires_precise() && id.precise().is_none() {
+        if old_src.requires_precise() && !id.has_precise() {
             bail!(
                 "\
 the source {orig} requires a lock file to be present first before it can be
@@ -216,6 +229,23 @@ restore the source replacement configuration to continue the build
         }
 
         Ok(Box::new(ReplacedSource::new(id, new_id, new_src)))
+    }
+
+    /// Gets the [`Source`] for a given [`SourceId`] without performing any source replacement.
+    fn load_overlaid(
+        &self,
+        id: SourceId,
+        yanked_whitelist: &HashSet<PackageId>,
+    ) -> CargoResult<Box<dyn Source + 'gctx>> {
+        let src = id.load(self.gctx, yanked_whitelist)?;
+        if let Some(overlay_id) = self.overlays.get(&id) {
+            let overlay = overlay_id.load(self.gctx(), yanked_whitelist)?;
+            Ok(Box::new(DependencyConfusionThreatOverlaySource::new(
+                overlay, src,
+            )))
+        } else {
+            Ok(src)
+        }
     }
 
     /// Adds a source config with an associated name.
@@ -242,14 +272,14 @@ restore the source replacement configuration to continue the build
         let mut srcs = Vec::new();
         if let Some(registry) = def.registry {
             let url = url(&registry, &format!("source.{}.registry", name))?;
-            srcs.push(SourceId::for_alt_registry(&url, &name)?);
+            srcs.push(SourceId::for_source_replacement_registry(&url, &name)?);
         }
         if let Some(local_registry) = def.local_registry {
-            let path = local_registry.resolve_path(self.config);
+            let path = local_registry.resolve_path(self.gctx);
             srcs.push(SourceId::for_local_registry(&path)?);
         }
         if let Some(directory) = def.directory {
-            let path = directory.resolve_path(self.config);
+            let path = directory.resolve_path(self.gctx);
             srcs.push(SourceId::for_directory(&path)?);
         }
         if let Some(git) = def.git {
@@ -283,7 +313,7 @@ restore the source replacement configuration to continue the build
             check_not_set("rev", def.rev)?;
         }
         if name == CRATES_IO_REGISTRY && srcs.is_empty() {
-            srcs.push(SourceId::crates_io_maybe_sparse_http(self.config)?);
+            srcs.push(SourceId::crates_io_maybe_sparse_http(self.gctx)?);
         }
 
         match srcs.len() {
@@ -314,7 +344,7 @@ restore the source replacement configuration to continue the build
 
         return Ok(());
 
-        fn url(val: &config::Value<String>, key: &str) -> CargoResult<Url> {
+        fn url(val: &context::Value<String>, key: &str) -> CargoResult<Url> {
             let url = val.val.into_url().with_context(|| {
                 format!(
                     "configuration key `{}` specified an invalid \

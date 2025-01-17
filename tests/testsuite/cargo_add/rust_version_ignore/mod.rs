@@ -1,8 +1,9 @@
 use cargo_test_support::compare::assert_ui;
+use cargo_test_support::current_dir;
+use cargo_test_support::file;
 use cargo_test_support::prelude::*;
+use cargo_test_support::str;
 use cargo_test_support::Project;
-
-use cargo_test_support::curr_dir;
 
 #[cargo_test]
 fn case() {
@@ -14,21 +15,20 @@ fn case() {
         .rust_version("1.72")
         .publish();
 
-    let project = Project::from_template(curr_dir!().join("in"));
+    let project = Project::from_template(current_dir!().join("in"));
     let project_root = project.root();
     let cwd = &project_root;
 
     snapbox::cmd::Command::cargo_ui()
-        .arg("-Zmsrv-policy")
         .arg("add")
         .arg("--ignore-rust-version")
         .arg_line("rust-version-user")
         .current_dir(cwd)
-        .masquerade_as_nightly_cargo(&["msrv-policy"])
+        .env("CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS", "fallback")
         .assert()
-        .code(101)
-        .stdout_matches_path(curr_dir!().join("stdout.log"))
-        .stderr_matches_path(curr_dir!().join("stderr.log"));
+        .code(0)
+        .stdout_eq(str![""])
+        .stderr_eq(file!["stderr.term.svg"]);
 
-    assert_ui().subset_matches(curr_dir!().join("out"), &project_root);
+    assert_ui().subset_matches(current_dir!().join("out"), &project_root);
 }

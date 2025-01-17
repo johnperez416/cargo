@@ -5,13 +5,17 @@ use cargo::ops;
 pub fn cli() -> Command {
     subcommand("generate-lockfile")
         .about("Generate the lockfile for a package")
-        .arg_quiet()
+        .arg_silent_suggestion()
         .arg_manifest_path()
-        .after_help("Run `cargo help generate-lockfile` for more detailed information.\n")
+        .arg_lockfile_path()
+        .arg_ignore_rust_version_with_help("Ignore `rust-version` specification in packages")
+        .after_help(color_print::cstr!(
+            "Run `<cyan,bold>cargo help generate-lockfile</>` for more detailed information.\n"
+        ))
 }
 
-pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
-    let ws = args.workspace(config)?;
+pub fn exec(gctx: &mut GlobalContext, args: &ArgMatches) -> CliResult {
+    let ws = args.workspace(gctx)?;
     ops::generate_lockfile(&ws)?;
     Ok(())
 }

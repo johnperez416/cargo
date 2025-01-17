@@ -1,9 +1,10 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
+use rustc_hash::{FxHashMap, FxHashSet};
 use tracing::trace;
 
 use super::types::ConflictMap;
-use crate::core::resolver::Context;
+use crate::core::resolver::ResolverContext;
 use crate::core::{Dependency, PackageId};
 
 /// This is a trie for storing a large number of sets designed to
@@ -140,17 +141,17 @@ pub(super) struct ConflictCache {
     // as a global cache which we never delete from. Any entry in this map is
     // unconditionally true regardless of our resolution history of how we got
     // here.
-    con_from_dep: HashMap<Dependency, ConflictStoreTrie>,
+    con_from_dep: FxHashMap<Dependency, ConflictStoreTrie>,
     // `dep_from_pid` is an inverse-index of `con_from_dep`.
     // For every `PackageId` this lists the `Dependency`s that mention it in `dep_from_pid`.
-    dep_from_pid: HashMap<PackageId, HashSet<Dependency>>,
+    dep_from_pid: FxHashMap<PackageId, FxHashSet<Dependency>>,
 }
 
 impl ConflictCache {
     pub fn new() -> ConflictCache {
         ConflictCache {
-            con_from_dep: HashMap::new(),
-            dep_from_pid: HashMap::new(),
+            con_from_dep: HashMap::default(),
+            dep_from_pid: HashMap::default(),
         }
     }
     pub fn find(
@@ -171,7 +172,7 @@ impl ConflictCache {
     /// one that will allow for the most jump-back.
     pub fn find_conflicting(
         &self,
-        cx: &Context,
+        cx: &ResolverContext,
         dep: &Dependency,
         must_contain: Option<PackageId>,
     ) -> Option<&ConflictMap> {
@@ -186,7 +187,7 @@ impl ConflictCache {
         }
         out
     }
-    pub fn conflicting(&self, cx: &Context, dep: &Dependency) -> Option<&ConflictMap> {
+    pub fn conflicting(&self, cx: &ResolverContext, dep: &Dependency) -> Option<&ConflictMap> {
         self.find_conflicting(cx, dep, None)
     }
 
@@ -194,11 +195,6 @@ impl ConflictCache {
     /// `dep` is known to be unresolvable if
     /// all the `PackageId` entries are activated.
     pub fn insert(&mut self, dep: &Dependency, con: &ConflictMap) {
-        if con.values().any(|c| c.is_public_dependency()) {
-            // TODO: needs more info for back jumping
-            // for now refuse to cache it.
-            return;
-        }
         self.con_from_dep
             .entry(dep.clone())
             .or_insert_with(|| ConflictStoreTrie::Node(BTreeMap::new()))
@@ -212,14 +208,11 @@ impl ConflictCache {
         );
 
         for c in con.keys() {
-            self.dep_from_pid
-                .entry(*c)
-                .or_insert_with(HashSet::new)
-                .insert(dep.clone());
+            self.dep_from_pid.entry(*c).or_default().insert(dep.clone());
         }
     }
 
-    pub fn dependencies_conflicting_with(&self, pid: PackageId) -> Option<&HashSet<Dependency>> {
+    pub fn dependencies_conflicting_with(&self, pid: PackageId) -> Option<&FxHashSet<Dependency>> {
         self.dep_from_pid.get(&pid)
     }
 }

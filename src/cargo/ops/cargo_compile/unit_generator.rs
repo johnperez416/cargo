@@ -4,8 +4,8 @@ use std::fmt::Write;
 
 use crate::core::compiler::rustdoc::RustdocScrapeExamples;
 use crate::core::compiler::unit_dependencies::IsArtifact;
-use crate::core::compiler::UnitInterner;
 use crate::core::compiler::{CompileKind, CompileMode, Unit};
+use crate::core::compiler::{RustcTargetData, UnitInterner};
 use crate::core::dependency::DepKind;
 use crate::core::profiles::{Profiles, UnitFor};
 use crate::core::resolver::features::{self, FeaturesFor};
@@ -44,9 +44,10 @@ struct Proposal<'a> {
 /// [`generate_root_units`]: UnitGenerator::generate_root_units
 /// [`build_unit_dependencies`]: crate::core::compiler::unit_dependencies::build_unit_dependencies
 /// [`UnitGraph`]: crate::core::compiler::unit_graph::UnitGraph
-pub(super) struct UnitGenerator<'a, 'cfg> {
-    pub ws: &'a Workspace<'cfg>,
+pub(super) struct UnitGenerator<'a, 'gctx> {
+    pub ws: &'a Workspace<'gctx>,
     pub packages: &'a [&'a Package],
+    pub target_data: &'a RustcTargetData<'gctx>,
     pub filter: &'a CompileFilter,
     pub requested_kinds: &'a [CompileKind],
     pub explicit_host_kind: CompileKind,
@@ -54,7 +55,7 @@ pub(super) struct UnitGenerator<'a, 'cfg> {
     pub resolve: &'a Resolve,
     pub workspace_resolve: &'a Option<Resolve>,
     pub resolved_features: &'a features::ResolvedFeatures,
-    pub package_set: &'a PackageSet<'cfg>,
+    pub package_set: &'a PackageSet<'gctx>,
     pub profiles: &'a Profiles,
     pub interner: &'a UnitInterner,
     pub has_dev_units: HasDevUnits,
@@ -148,7 +149,7 @@ impl<'a> UnitGenerator<'a, '_> {
                     //
                     // Forcing the lib to be compiled three times during `cargo
                     // test` is probably also not desirable.
-                    UnitFor::new_test(self.ws.config(), kind)
+                    UnitFor::new_test(self.ws.gctx(), kind)
                 } else if target.for_host() {
                     // Proc macro / plugin should not have `panic` set.
                     UnitFor::new_compiler(kind)
@@ -162,13 +163,17 @@ impl<'a> UnitGenerator<'a, '_> {
                     unit_for,
                     kind,
                 );
+                let kind = kind.for_target(target);
                 self.interner.intern(
                     pkg,
                     target,
                     profile,
-                    kind.for_target(target),
+                    kind,
                     target_mode,
                     features.clone(),
+                    self.target_data.info(kind).rustflags.clone(),
+                    self.target_data.info(kind).rustdocflags.clone(),
+                    self.target_data.target_config(kind).links_overrides.clone(),
                     /*is_std*/ false,
                     /*dep_hash*/ 0,
                     IsArtifact::No,
@@ -198,7 +203,9 @@ impl<'a> UnitGenerator<'a, '_> {
                     .filter(|t| {
                         t.documented()
                             && (!t.is_bin()
-                                || !targets.iter().any(|l| l.is_lib() && l.name() == t.name()))
+                                || !targets
+                                    .iter()
+                                    .any(|l| l.is_lib() && l.crate_name() == t.crate_name()))
                     })
                     .collect()
             }
@@ -361,7 +368,7 @@ impl<'a> UnitGenerator<'a, '_> {
                         if self.mode.is_doc_test() && !target.doctestable() {
                             let types = target.rustc_crate_types();
                             let types_str: Vec<&str> = types.iter().map(|t| t.as_str()).collect();
-                            self.ws.config().shell().warn(format!(
+                            self.ws.gctx().shell().warn(format!(
                       "doc tests are not supported for crate type(s) `{}` in package `{}`",
                       types_str.join(", "),
                       pkg.name()
@@ -487,7 +494,7 @@ impl<'a> UnitGenerator<'a, '_> {
 
         let skipped_examples = skipped_examples.into_inner();
         if !skipped_examples.is_empty() {
-            let mut shell = self.ws.config().shell();
+            let mut shell = self.ws.gctx().shell();
             let example_str = skipped_examples.join(", ");
             shell.warn(format!(
                 "\
@@ -505,7 +512,7 @@ Rustdoc did not scrape the following examples because they require dev-dependenc
     /// We want to emit a warning to make sure the user knows that this run is a no-op,
     /// and their code remains unchecked despite cargo not returning any errors
     fn unmatched_target_filters(&self, units: &[Unit]) -> CargoResult<()> {
-        let mut shell = self.ws.config().shell();
+        let mut shell = self.ws.gctx().shell();
         if let CompileFilter::Only {
             all_targets,
             lib: _,
@@ -537,7 +544,7 @@ Rustdoc did not scrape the following examples because they require dev-dependenc
                 }
 
                 return shell.warn(format!(
-                    "Target {}{} specified, but no targets matched. This is a no-op",
+                    "target {}{} specified, but no targets matched; this is a no-op",
                     if miss_count > 1 { "filters" } else { "filter" },
                     filters,
                 ));
@@ -562,7 +569,7 @@ Rustdoc did not scrape the following examples because they require dev-dependenc
             Some(resolve) => resolve,
         };
 
-        let mut shell = self.ws.config().shell();
+        let mut shell = self.ws.gctx().shell();
         for feature in required_features {
             let fv = FeatureValue::new(feature.into());
             match &fv {

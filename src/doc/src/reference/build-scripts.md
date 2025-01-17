@@ -1,4 +1,4 @@
-## Build Scripts
+# Build Scripts
 
 Some packages need to compile third-party non-Rust code, for example C
 libraries. Other packages need to link to C libraries which can either be
@@ -15,7 +15,7 @@ that script and execute it just before building the package.
 // Example custom build script.
 fn main() {
     // Tell Cargo that if the given file changes, to rerun this build script.
-    println!("cargo:rerun-if-changed=src/hello.c");
+    println!("cargo::rerun-if-changed=src/hello.c");
     // Use the `cc` crate to build a C file and statically link it.
     cc::Build::new()
         .file("src/hello.c")
@@ -37,12 +37,12 @@ scripts.
 > Note: The [`package.build` manifest key](manifest.md#the-build-field) can be
 > used to change the name of the build script, or disable it entirely.
 
-### Life Cycle of a Build Script
+## Life Cycle of a Build Script
 
 Just before a package is built, Cargo will compile a build script into an
 executable (if it has not already been built). It will then run the script,
 which may perform any number of tasks. The script may communicate with Cargo
-by printing specially formatted commands prefixed with `cargo:` to stdout.
+by printing specially formatted commands prefixed with `cargo::` to stdout.
 
 The build script will be rebuilt if any of its source files or dependencies
 change.
@@ -57,7 +57,7 @@ will be compiled. Scripts should exit with a non-zero exit code to halt the
 build if there is an error, in which case the build script's output will be
 displayed on the terminal.
 
-### Inputs to the Build Script
+## Inputs to the Build Script
 
 When the build script is run, there are a number of inputs to the build script,
 all passed in the form of [environment variables][build-env].
@@ -67,23 +67,23 @@ the source directory of the build script’s package.
 
 [build-env]: environment-variables.md#environment-variables-cargo-sets-for-build-scripts
 
-### Outputs of the Build Script
+## Outputs of the Build Script
 
 Build scripts may save any output files or intermediate artifacts in the
 directory specified in the [`OUT_DIR` environment variable][build-env]. Scripts
 should not modify any files outside of that directory.
 
 Build scripts communicate with Cargo by printing to stdout. Cargo will
-interpret each line that starts with `cargo:` as an instruction that will
+interpret each line that starts with `cargo::` as an instruction that will
 influence compilation of the package. All other lines are ignored.
 
-> Note: The order of `cargo:` instructions printed by the build script *may*
+> The order of `cargo::` instructions printed by the build script *may*
 > affect the order of arguments that `cargo` passes to `rustc`. In turn, the
 > order of arguments passed to `rustc` may affect the order of arguments passed
 > to the linker. Therefore, you will want to pay attention to the order of the
 > build script's instructions. For example, if object `foo` needs to link against
 > library `bar`, you may want to make sure that library `bar`'s
-> [`cargo:rustc-link-lib`](#rustc-link-lib) instruction appears *after*
+> [`cargo::rustc-link-lib`](#rustc-link-lib) instruction appears *after*
 > instructions to link object `foo`.
 
 The output of the script is hidden from the terminal during normal
@@ -99,40 +99,45 @@ configuration). The stderr output is also saved in that same directory.
 The following is a summary of the instructions that Cargo recognizes, with each
 one detailed below.
 
-* [`cargo:rerun-if-changed=PATH`](#rerun-if-changed) --- Tells Cargo when to
+* [`cargo::rerun-if-changed=PATH`](#rerun-if-changed) --- Tells Cargo when to
   re-run the script.
-* [`cargo:rerun-if-env-changed=VAR`](#rerun-if-env-changed) --- Tells Cargo when
+* [`cargo::rerun-if-env-changed=VAR`](#rerun-if-env-changed) --- Tells Cargo when
   to re-run the script.
-* [`cargo:rustc-link-arg=FLAG`](#rustc-link-arg) --- Passes custom flags to a
+* [`cargo::rustc-link-arg=FLAG`](#rustc-link-arg) --- Passes custom flags to a
   linker for benchmarks, binaries, `cdylib` crates, examples, and tests.
-* [`cargo:rustc-link-arg-bin=BIN=FLAG`](#rustc-link-arg-bin) --- Passes custom
+* [`cargo::rustc-link-arg-bin=BIN=FLAG`](#rustc-link-arg-bin) --- Passes custom
   flags to a linker for the binary `BIN`.
-* [`cargo:rustc-link-arg-bins=FLAG`](#rustc-link-arg-bins) --- Passes custom
+* [`cargo::rustc-link-arg-bins=FLAG`](#rustc-link-arg-bins) --- Passes custom
   flags to a linker for binaries.
-* [`cargo:rustc-link-arg-tests=FLAG`](#rustc-link-arg-tests) --- Passes custom
+* [`cargo::rustc-link-arg-tests=FLAG`](#rustc-link-arg-tests) --- Passes custom
   flags to a linker for tests.
-* [`cargo:rustc-link-arg-examples=FLAG`](#rustc-link-arg-examples) --- Passes custom
+* [`cargo::rustc-link-arg-examples=FLAG`](#rustc-link-arg-examples) --- Passes custom
   flags to a linker for examples.
-* [`cargo:rustc-link-arg-benches=FLAG`](#rustc-link-arg-benches) --- Passes custom
+* [`cargo::rustc-link-arg-benches=FLAG`](#rustc-link-arg-benches) --- Passes custom
   flags to a linker for benchmarks.
-* [`cargo:rustc-link-lib=LIB`](#rustc-link-lib) --- Adds a library to
+* [`cargo::rustc-link-lib=LIB`](#rustc-link-lib) --- Adds a library to
   link.
-* [`cargo:rustc-link-search=[KIND=]PATH`](#rustc-link-search) --- Adds to the
+* [`cargo::rustc-link-search=[KIND=]PATH`](#rustc-link-search) --- Adds to the
   library search path.
-* [`cargo:rustc-flags=FLAGS`](#rustc-flags) --- Passes certain flags to the
+* [`cargo::rustc-flags=FLAGS`](#rustc-flags) --- Passes certain flags to the
   compiler.
-* [`cargo:rustc-cfg=KEY[="VALUE"]`](#rustc-cfg) --- Enables compile-time `cfg`
+* [`cargo::rustc-cfg=KEY[="VALUE"]`](#rustc-cfg) --- Enables compile-time `cfg`
   settings.
-* [`cargo:rustc-env=VAR=VALUE`](#rustc-env) --- Sets an environment variable.
-* [`cargo:rustc-cdylib-link-arg=FLAG`](#rustc-cdylib-link-arg) --- Passes custom
+* [`cargo::rustc-check-cfg=CHECK_CFG`](#rustc-check-cfg) -- Register custom `cfg`s as
+  expected for compile-time checking of configs. 
+* [`cargo::rustc-env=VAR=VALUE`](#rustc-env) --- Sets an environment variable.
+* [`cargo::rustc-cdylib-link-arg=FLAG`](#rustc-cdylib-link-arg) --- Passes custom
   flags to a linker for cdylib crates.
-* [`cargo:warning=MESSAGE`](#cargo-warning) --- Displays a warning on the
+- [`cargo::error=MESSAGE`](#cargo-error) --- Displays an error on the terminal.
+* [`cargo::warning=MESSAGE`](#cargo-warning) --- Displays a warning on the
   terminal.
-* [`cargo:KEY=VALUE`](#the-links-manifest-key) --- Metadata, used by `links`
+* [`cargo::metadata=KEY=VALUE`](#the-links-manifest-key) --- Metadata, used by `links`
   scripts.
 
+> **MSRV:** 1.77 is required for `cargo::KEY=VALUE` syntax.
+> To support older versions, use the `cargo:KEY=VALUE` syntax.
 
-#### `cargo:rustc-link-arg=FLAG` {#rustc-link-arg}
+### `cargo::rustc-link-arg=FLAG` {#rustc-link-arg}
 
 The `rustc-link-arg` instruction tells Cargo to pass the [`-C link-arg=FLAG`
 option][link-arg] to the compiler, but only when building supported targets
@@ -142,23 +147,21 @@ linker script.
 
 [link-arg]: ../../rustc/codegen-options/index.md#link-arg
 
-#### `cargo:rustc-link-arg-bin=BIN=FLAG` {#rustc-link-arg-bin}
+### `cargo::rustc-link-arg-bin=BIN=FLAG` {#rustc-link-arg-bin}
 
 The `rustc-link-arg-bin` instruction tells Cargo to pass the [`-C
 link-arg=FLAG` option][link-arg] to the compiler, but only when building
 the binary target with name `BIN`. Its usage is highly platform specific. It is useful
 to set a linker script or other linker options.
 
-
-#### `cargo:rustc-link-arg-bins=FLAG` {#rustc-link-arg-bins}
+### `cargo::rustc-link-arg-bins=FLAG` {#rustc-link-arg-bins}
 
 The `rustc-link-arg-bins` instruction tells Cargo to pass the [`-C
 link-arg=FLAG` option][link-arg] to the compiler, but only when building a
 binary target. Its usage is highly platform specific. It is useful
 to set a linker script or other linker options.
 
-
-#### `cargo:rustc-link-lib=LIB` {#rustc-link-lib}
+### `cargo::rustc-link-lib=LIB` {#rustc-link-lib}
 
 The `rustc-link-lib` instruction tells Cargo to link the given library using
 the compiler's [`-l` flag][option-link]. This is typically used to link a
@@ -166,7 +169,7 @@ native library using [FFI].
 
 The `LIB` string is passed directly to rustc, so it supports any syntax that
 `-l` does. \
-Currently the full supported syntax for `LIB` is `[KIND[:MODIFIERS]=]NAME[:RENAME]`.
+Currently the fully supported syntax for `LIB` is `[KIND[:MODIFIERS]=]NAME[:RENAME]`.
 
 The `-l` flag is only passed to the library target of the package, unless
 there is no library target, in which case it is passed to all targets. This is
@@ -182,27 +185,25 @@ The optional `KIND` may be one of `dylib`, `static`, or `framework`. See the
 [option-link]: ../../rustc/command-line-arguments.md#option-l-link-lib
 [FFI]: ../../nomicon/ffi.md
 
-
-#### `cargo:rustc-link-arg-tests=FLAG` {#rustc-link-arg-tests}
+### `cargo::rustc-link-arg-tests=FLAG` {#rustc-link-arg-tests}
 
 The `rustc-link-arg-tests` instruction tells Cargo to pass the [`-C
 link-arg=FLAG` option][link-arg] to the compiler, but only when building a
 tests target.
 
-
-#### `cargo:rustc-link-arg-examples=FLAG` {#rustc-link-arg-examples}
+### `cargo::rustc-link-arg-examples=FLAG` {#rustc-link-arg-examples}
 
 The `rustc-link-arg-examples` instruction tells Cargo to pass the [`-C
 link-arg=FLAG` option][link-arg] to the compiler, but only when building an examples
 target.
 
-#### `cargo:rustc-link-arg-benches=FLAG` {#rustc-link-arg-benches}
+### `cargo::rustc-link-arg-benches=FLAG` {#rustc-link-arg-benches}
 
 The `rustc-link-arg-benches` instruction tells Cargo to pass the [`-C
 link-arg=FLAG` option][link-arg] to the compiler, but only when building a benchmark
 target.
 
-#### `cargo:rustc-link-search=[KIND=]PATH` {#rustc-link-search}
+### `cargo::rustc-link-search=[KIND=]PATH` {#rustc-link-search}
 
 The `rustc-link-search` instruction tells Cargo to pass the [`-L`
 flag][option-search] to the compiler to add a directory to the library search
@@ -220,18 +221,21 @@ is fine).
 
 [option-search]: ../../rustc/command-line-arguments.md#option-l-search-path
 
-#### `cargo:rustc-flags=FLAGS` {#rustc-flags}
+### `cargo::rustc-flags=FLAGS` {#rustc-flags}
 
 The `rustc-flags` instruction tells Cargo to pass the given space-separated
 flags to the compiler. This only allows the `-l` and `-L` flags, and is
 equivalent to using [`rustc-link-lib`](#rustc-link-lib) and
 [`rustc-link-search`](#rustc-link-search).
 
-#### `cargo:rustc-cfg=KEY[="VALUE"]` {#rustc-cfg}
+### `cargo::rustc-cfg=KEY[="VALUE"]` {#rustc-cfg}
 
 The `rustc-cfg` instruction tells Cargo to pass the given value to the
 [`--cfg` flag][option-cfg] to the compiler. This may be used for compile-time
-detection of features to enable [conditional compilation].
+detection of features to enable [conditional compilation]. Custom cfgs
+must either be expected using the [`cargo::rustc-check-cfg`](#rustc-check-cfg)
+instruction or usage will need to allow the [`unexpected_cfgs`][unexpected-cfgs]
+lint to avoid unexpected cfgs warnings.
 
 Note that this does *not* affect Cargo's dependency resolution. This cannot be
 used to enable an optional dependency, or enable other Cargo features.
@@ -239,16 +243,51 @@ used to enable an optional dependency, or enable other Cargo features.
 Be aware that [Cargo features] use the form `feature="foo"`. `cfg` values
 passed with this flag are not restricted to that form, and may provide just a
 single identifier, or any arbitrary key/value pair. For example, emitting
-`cargo:rustc-cfg=abc` will then allow code to use `#[cfg(abc)]` (note the lack
+`cargo::rustc-cfg=abc` will then allow code to use `#[cfg(abc)]` (note the lack
 of `feature=`). Or an arbitrary key/value pair may be used with an `=` symbol
-like `cargo:rustc-cfg=my_component="foo"`. The key should be a Rust
+like `cargo::rustc-cfg=my_component="foo"`. The key should be a Rust
 identifier, the value should be a string.
 
 [cargo features]: features.md
 [conditional compilation]: ../../reference/conditional-compilation.md
 [option-cfg]: ../../rustc/command-line-arguments.md#option-cfg
+[unexpected-cfgs]: ../../rustc/lints/listing/warn-by-default.md#unexpected-cfgs
 
-#### `cargo:rustc-env=VAR=VALUE` {#rustc-env}
+### `cargo::rustc-check-cfg=CHECK_CFG` {#rustc-check-cfg}
+
+Add to the list of expected config names and values that is used when checking
+the _reachable_ cfg expressions with the [`unexpected_cfgs`][unexpected-cfgs] lint.
+
+The syntax of `CHECK_CFG` mirrors the `rustc` [`--check-cfg` flag][option-check-cfg], see
+[Checking conditional configurations][checking-conditional-configurations] for more details.
+
+The instruction can be used like this:
+
+```rust,no_run
+// build.rs
+println!("cargo::rustc-check-cfg=cfg(foo, values(\"bar\"))");
+if foo_bar_condition {
+    println!("cargo::rustc-cfg=foo=\"bar\"");
+}
+```
+
+Note that all possible cfgs should be defined, regardless of which cfgs are
+currently enabled. This includes all possible values of a given cfg name.
+
+It is recommended to group the `cargo::rustc-check-cfg` and
+[`cargo::rustc-cfg`][option-cfg] instructions as closely as possible in order to
+avoid typos, missing check-cfg, stale cfgs...
+
+See also the
+[conditional compilation][conditional-compilation-example] example.
+
+> **MSRV:** Respected as of 1.80
+
+[checking-conditional-configurations]: ../../rustc/check-cfg.html
+[option-check-cfg]: ../../rustc/command-line-arguments.md#option-check-cfg
+[conditional-compilation-example]: build-script-examples.md#conditional-compilation
+
+### `cargo::rustc-env=VAR=VALUE` {#rustc-env}
 
 The `rustc-env` instruction tells Cargo to set the given environment variable
 when compiling the package. The value can be then retrieved by the [`env!`
@@ -268,23 +307,36 @@ Cargo][env-cargo].
 [env-macro]: ../../std/macro.env.html
 [env-cargo]: environment-variables.md#environment-variables-cargo-sets-for-crates
 
-#### `cargo:rustc-cdylib-link-arg=FLAG` {#rustc-cdylib-link-arg}
+### `cargo::rustc-cdylib-link-arg=FLAG` {#rustc-cdylib-link-arg}
 
 The `rustc-cdylib-link-arg` instruction tells Cargo to pass the [`-C
 link-arg=FLAG` option][link-arg] to the compiler, but only when building a
 `cdylib` library target. Its usage is highly platform specific. It is useful
 to set the shared library version or the runtime-path.
 
+### `cargo::error=MESSAGE` {#cargo-error}
 
-#### `cargo:warning=MESSAGE` {#cargo-warning}
+The `error` instruction tells Cargo to display an error after the build script
+has finished running, and then fail the build.
+
+ > Note: Build script libraries should carefully consider if they want to
+ > use `cargo::error` versus returning a `Result`. It may be better to return
+ > a `Result`, and allow the caller to decide if the error is fatal or not.
+ > The caller can then decide whether or not to display the `Err` variant
+ > using `cargo::error`.
+
+> **MSRV:** Respected as of 1.84
+
+### `cargo::warning=MESSAGE` {#cargo-warning}
 
 The `warning` instruction tells Cargo to display a warning after the build
 script has finished running. Warnings are only shown for `path` dependencies
 (that is, those you're working on locally), so for example warnings printed
-out in [crates.io] crates are not emitted by default. The `-vv` "very verbose"
-flag may be used to have Cargo display warnings for all crates.
+out in [crates.io] crates are not emitted by default, unless the build fails.
+The `-vv` "very verbose" flag may be used to have Cargo display warnings for
+all crates.
 
-### Build Dependencies
+## Build Dependencies
 
 Build scripts are also allowed to have dependencies on other Cargo-based crates.
 Dependencies are declared through the `build-dependencies` section of the
@@ -306,7 +358,7 @@ attempt to reuse a dependency if it is shared between build dependencies and
 normal dependencies. However, this is not always possible, for example when
 cross-compiling, so keep that in consideration of the impact on compile time.
 
-### Change Detection
+## Change Detection
 
 When rebuilding a package, Cargo does not necessarily know if the build script
 needs to be run again. By default, it takes a conservative approach of always
@@ -321,7 +373,7 @@ FAQ](../faq.md#why-is-cargo-rebuilding-my-code).
 
 [`exclude` and `include` fields]: manifest.md#the-exclude-and-include-fields
 
-#### `cargo:rerun-if-changed=PATH` {#rerun-if-changed}
+### `cargo::rerun-if-changed=PATH` {#rerun-if-changed}
 
 The `rerun-if-changed` instruction tells Cargo to re-run the build script if
 the file at the given path has changed. Currently, Cargo only uses the
@@ -333,14 +385,14 @@ If the path points to a directory, it will scan the entire directory for
 any modifications.
 
 If the build script inherently does not need to re-run under any circumstance,
-then emitting `cargo:rerun-if-changed=build.rs` is a simple way to prevent it
+then emitting `cargo::rerun-if-changed=build.rs` is a simple way to prevent it
 from being re-run (otherwise, the default if no `rerun-if` instructions are
 emitted is to scan the entire package directory for changes). Cargo
 automatically handles whether or not the script itself needs to be recompiled,
 and of course the script will be re-run after it has been recompiled.
 Otherwise, specifying `build.rs` is redundant and unnecessary.
 
-#### `cargo:rerun-if-env-changed=NAME` {#rerun-if-env-changed}
+### `cargo::rerun-if-env-changed=NAME` {#rerun-if-env-changed}
 
 The `rerun-if-env-changed` instruction tells Cargo to re-run the build script
 if the value of an environment variable of the given name has changed.
@@ -351,8 +403,14 @@ variables like `TARGET` that [Cargo sets for build scripts][build-env]. The
 environment variables in use are those received by `cargo` invocations, not
 those received by the executable of the build script.
 
+As of 1.46, using [`env!`][env-macro] and [`option_env!`][option-env-macro] in
+source code will automatically detect changes and trigger rebuilds.
+`rerun-if-env-changed` is no longer needed for variables already referenced by
+these macros.
 
-### The `links` Manifest Key
+[option-env-macro]: ../../std/macro.option_env.html
+
+## The `links` Manifest Key
 
 The `package.links` key may be set in the `Cargo.toml` manifest to declare
 that the package links with the given native library. The purpose of this
@@ -376,21 +434,27 @@ In other words, it is forbidden to have two packages link to the same native
 library. This helps prevent duplicate symbols between crates. Note, however,
 that there are [conventions in place](#-sys-packages) to alleviate this.
 
-As mentioned above in the output format, each build script can generate an
-arbitrary set of metadata in the form of key-value pairs. This metadata is
-passed to the build scripts of **dependent** packages. For example, if the
-package `bar` depends on `foo`, then if `foo` generates `key=value` as part of
-its build script metadata, then the build script of `bar` will have the
-environment variables `DEP_FOO_KEY=value`. See the ["Using another `sys`
-crate"][using-another-sys] for an example of
+Build scripts can generate an arbitrary set of metadata in the form of
+key-value pairs. This metadata is set with the `cargo::metadata=KEY=VALUE`
+instruction.
+
+The metadata is passed to the build scripts of **dependent** packages. For
+example, if the package `foo` depends on `bar`, which links `baz`, then if 
+`bar` generates `key=value` as part of its build script metadata, then the
+build script of `foo` will have the environment variables `DEP_BAZ_KEY=value`
+(note that the value of the `links` key is used).
+See the ["Using another `sys` crate"][using-another-sys] for an example of 
 how this can be used.
 
 Note that metadata is only passed to immediate dependents, not transitive
 dependents.
 
+> **MSRV:** 1.77 is required for `cargo::metadata=KEY=VALUE`.
+> To support older versions, use `cargo:KEY=VAUE` (unsupported directives are assumed to be metadata keys).
+
 [using-another-sys]: build-script-examples.md#using-another-sys-crate
 
-### `*-sys` Packages
+## `*-sys` Packages
 
 Some Cargo packages that link to system libraries have a naming convention of
 having a `-sys` suffix. Any package named `foo-sys` should provide two major
@@ -423,7 +487,7 @@ example, the [`git2` crate] provides a high-level interface to the
 [`git2` crate]: https://crates.io/crates/git2
 [`libgit2-sys` crate]: https://crates.io/crates/libgit2-sys
 
-### Overriding Build Scripts
+## Overriding Build Scripts
 
 If a manifest contains a `links` key, then Cargo supports overriding the build
 script specified with a custom library. The purpose of this functionality is to
@@ -451,7 +515,7 @@ be used instead.
 The `warning`, `rerun-if-changed`, and `rerun-if-env-changed` keys should not
 be used and will be ignored.
 
-### Jobserver
+## Jobserver
 
 Cargo and `rustc` use the [jobserver protocol], developed for GNU make, to
 coordinate concurrency across processes. It is essentially a semaphore that

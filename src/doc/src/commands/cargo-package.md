@@ -1,5 +1,4 @@
 # cargo-package(1)
-
 ## NAME
 
 cargo-package --- Assemble the local package into a distributable tarball
@@ -11,9 +10,8 @@ cargo-package --- Assemble the local package into a distributable tarball
 ## DESCRIPTION
 
 This command will create a distributable, compressed `.crate` file with the
-source code of the package in the current directory. The resulting file will
-be stored in the `target/package` directory. This performs the following
-steps:
+source code of the package in the current directory. The resulting file will be
+stored in the `target/package` directory. This performs the following steps:
 
 1. Load and check the current workspace, performing some basic checks.
     - Path dependencies are not allowed unless they have a version key. Cargo
@@ -23,12 +21,16 @@ steps:
     - The original `Cargo.toml` file is rewritten and normalized.
     - `[patch]`, `[replace]`, and `[workspace]` sections are removed from the
       manifest.
-    - `Cargo.lock` is automatically included if the package contains an
-      executable binary or example target. [cargo-install(1)](cargo-install.html) will use the
-      packaged lock file if the `--locked` flag is used.
+    - `Cargo.lock` is always included. When missing, a new lock file will be
+      generated. [cargo-install(1)](cargo-install.html) will use the packaged lock file if
+      the `--locked` flag is used.
     - A `.cargo_vcs_info.json` file is included that contains information
-      about the current VCS checkout hash if available (not included with
-      `--allow-dirty`).
+      about the current VCS checkout hash if available, as well as a flag if the
+      worktree is dirty.
+    - Symlinks are flattened to their target files.
+    - Files and directories are included or excluded based on rules mentioned in
+      [the `[include]` and `[exclude]` fields](../reference/manifest.html#the-exclude-and-include-fields).
+
 3. Extract the `.crate` file and build it to verify it can build.
     - This will rebuild your package from scratch to ensure that it can be
       built from a pristine state. The `--no-verify` flag can be used to skip
@@ -48,14 +50,25 @@ Will generate a `.cargo_vcs_info.json` in the following format
 ```javascript
 {
  "git": {
-   "sha1": "aac20b6e7e543e6dd4118b246c77225e3a3a1302"
+   "sha1": "aac20b6e7e543e6dd4118b246c77225e3a3a1302",
+   "dirty": true
  },
  "path_in_vcs": ""
 }
 ```
 
+`dirty` indicates that the Git worktree was dirty when the package
+was built.
+
 `path_in_vcs` will be set to a repo-relative path for packages
 in subdirectories of the version control repository.
+
+The compatibility of this file is maintained under the same policy
+as the JSON output of [cargo-metadata(1)](cargo-metadata.html).
+
+Note that this file provides a best-effort snapshot of the VCS information.
+However, the provenance of the package is not verified.
+There is no guarantee that the source code in the tarball matches the VCS information.
 
 ## OPTIONS
 
@@ -81,6 +94,18 @@ or the license).</dd>
 <dd class="option-desc">Allow working directories with uncommitted VCS changes to be packaged.</dd>
 
 
+<dt class="option-term" id="option-cargo-package---index"><a class="option-anchor" href="#option-cargo-package---index"></a><code>--index</code> <em>index</em></dt>
+<dd class="option-desc">The URL of the registry index to use.</dd>
+
+
+<dt class="option-term" id="option-cargo-package---registry"><a class="option-anchor" href="#option-cargo-package---registry"></a><code>--registry</code> <em>registry</em></dt>
+<dd class="option-desc">Name of the registry to package for; see <code>cargo publish --help</code> for more details
+about configuration of registry names. The packages will not be published
+to this registry, but if we are packaging multiple inter-dependent crates,
+lock-files will be generated under the assumption that dependencies will be
+published to this registry.</dd>
+
+
 </dl>
 
 ### Package Selection
@@ -102,14 +127,13 @@ virtual workspace will include all workspace members (equivalent to passing
 <dt class="option-term" id="option-cargo-package---package"><a class="option-anchor" href="#option-cargo-package---package"></a><code>--package</code> <em>spec</em>…</dt>
 <dd class="option-desc">Package only the specified packages. See <a href="cargo-pkgid.html">cargo-pkgid(1)</a> for the
 SPEC format. This flag may be specified multiple times and supports common Unix
-glob patterns like <code>*</code>, <code>?</code> and <code>[]</code>. However, to avoid your shell accidentally 
+glob patterns like <code>*</code>, <code>?</code> and <code>[]</code>. However, to avoid your shell accidentally
 expanding glob patterns before Cargo handles them, you must use single quotes or
 double quotes around each pattern.</dd>
 
 
 <dt class="option-term" id="option-cargo-package---workspace"><a class="option-anchor" href="#option-cargo-package---workspace"></a><code>--workspace</code></dt>
 <dd class="option-desc">Package all members in the workspace.</dd>
-
 
 
 
@@ -123,7 +147,6 @@ single quotes or double quotes around each pattern.</dd>
 
 </dl>
 
-
 ### Compilation Options
 
 <dl>
@@ -136,8 +159,7 @@ list of supported targets. This flag may be specified multiple times.</p>
 <a href="../reference/config.html">config value</a>.</p>
 <p>Note that specifying this flag makes Cargo run in a different mode where the
 target artifacts are placed in a separate directory. See the
-<a href="../guide/build-cache.html">build cache</a> documentation for more details.</dd>
-
+<a href="../reference/build-cache.html">build cache</a> documentation for more details.</dd>
 
 
 <dt class="option-term" id="option-cargo-package---target-dir"><a class="option-anchor" href="#option-cargo-package---target-dir"></a><code>--target-dir</code> <em>directory</em></dt>
@@ -145,7 +167,6 @@ target artifacts are placed in a separate directory. See the
 specified with the <code>CARGO_TARGET_DIR</code> environment variable, or the
 <code>build.target-dir</code> <a href="../reference/config.html">config value</a>.
 Defaults to <code>target</code> in the root of the workspace.</dd>
-
 
 
 </dl>
@@ -178,7 +199,6 @@ be specified multiple times, which enables all specified features.</dd>
 
 </dl>
 
-
 ### Manifest Options
 
 <dl>
@@ -188,16 +208,16 @@ be specified multiple times, which enables all specified features.</dd>
 <code>Cargo.toml</code> file in the current directory or any parent directory.</dd>
 
 
-
-<dt class="option-term" id="option-cargo-package---frozen"><a class="option-anchor" href="#option-cargo-package---frozen"></a><code>--frozen</code></dt>
 <dt class="option-term" id="option-cargo-package---locked"><a class="option-anchor" href="#option-cargo-package---locked"></a><code>--locked</code></dt>
-<dd class="option-desc">Either of these flags requires that the <code>Cargo.lock</code> file is
-up-to-date. If the lock file is missing, or it needs to be updated, Cargo will
-exit with an error. The <code>--frozen</code> flag also prevents Cargo from
-attempting to access the network to determine if it is out-of-date.</p>
-<p>These may be used in environments where you want to assert that the
-<code>Cargo.lock</code> file is up-to-date (such as a CI build) or want to avoid network
-access.</dd>
+<dd class="option-desc">Asserts that the exact same dependencies and versions are used as when the
+existing <code>Cargo.lock</code> file was originally generated. Cargo will exit with an
+error when either of the following scenarios arises:</p>
+<ul>
+<li>The lock file is missing.</li>
+<li>Cargo attempted to change the lock file due to a different dependency resolution.</li>
+</ul>
+<p>It may be used in environments where deterministic builds are desired,
+such as in CI pipelines.</dd>
 
 
 <dt class="option-term" id="option-cargo-package---offline"><a class="option-anchor" href="#option-cargo-package---offline"></a><code>--offline</code></dt>
@@ -212,6 +232,21 @@ See the <a href="cargo-fetch.html">cargo-fetch(1)</a> command to download depend
 offline.</p>
 <p>May also be specified with the <code>net.offline</code> <a href="../reference/config.html">config value</a>.</dd>
 
+
+<dt class="option-term" id="option-cargo-package---frozen"><a class="option-anchor" href="#option-cargo-package---frozen"></a><code>--frozen</code></dt>
+<dd class="option-desc">Equivalent to specifying both <code>--locked</code> and <code>--offline</code>.</dd>
+
+
+<dt class="option-term" id="option-cargo-package---lockfile-path"><a class="option-anchor" href="#option-cargo-package---lockfile-path"></a><code>--lockfile-path</code> <em>PATH</em></dt>
+<dd class="option-desc">Changes the path of the lockfile from the default (<code>&lt;workspace_root&gt;/Cargo.lock</code>) to <em>PATH</em>. <em>PATH</em> must end with
+<code>Cargo.lock</code> (e.g. <code>--lockfile-path /tmp/temporary-lockfile/Cargo.lock</code>). Note that providing
+<code>--lockfile-path</code> will ignore existing lockfile at the default path, and instead will
+either use the lockfile from <em>PATH</em>, or write a new lockfile into the provided <em>PATH</em> if it doesn’t exist.
+This flag can be used to run most commands in read-only directories, writing lockfile into the provided <em>PATH</em>.</p>
+<p>This option is only available on the <a href="https://doc.rust-lang.org/book/appendix-07-nightly-rust.html">nightly
+channel</a> and
+requires the <code>-Z unstable-options</code> flag to enable (see
+<a href="https://github.com/rust-lang/cargo/issues/14421">#14421</a>).</dd>
 
 
 </dl>
@@ -228,7 +263,6 @@ parallel jobs to the number of logical CPUs plus provided value. If
 a string <code>default</code> is provided, it sets the value back to defaults.
 Should not be 0.</dd>
 
-
 <dt class="option-term" id="option-cargo-package---keep-going"><a class="option-anchor" href="#option-cargo-package---keep-going"></a><code>--keep-going</code></dt>
 <dd class="option-desc">Build as many crates in the dependency graph as possible, rather than aborting
 the build on the first one that fails to build.</p>
@@ -237,7 +271,6 @@ one of which fails to build, <code>cargo package -j1</code> may or may not build
 one that succeeds (depending on which one of the two builds Cargo picked to run
 first), whereas <code>cargo package -j1 --keep-going</code> would definitely run both
 builds, even if the one run first fails.</dd>
-
 
 </dl>
 
@@ -269,7 +302,6 @@ terminal.</li>
 </ul>
 <p>May also be specified with the <code>term.color</code>
 <a href="../reference/config.html">config value</a>.</dd>
-
 
 </dl>
 
@@ -313,18 +345,15 @@ requires the <code>-Z unstable-options</code> flag to enable (see
 
 </dl>
 
-
 ## ENVIRONMENT
 
 See [the reference](../reference/environment-variables.html) for
 details on environment variables that Cargo reads.
 
-
 ## EXIT STATUS
 
 * `0`: Cargo succeeded.
 * `101`: Cargo failed to complete.
-
 
 ## EXAMPLES
 

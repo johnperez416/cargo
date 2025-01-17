@@ -7,9 +7,9 @@
 //! messages, guiding them to understand the issue and how to resolve it.
 //!
 //! Note that there are a lot of limitations here. This reads OpenSSH
-//! known_hosts files from well-known locations, but it does not read OpenSSH
+//! `known_hosts` files from well-known locations, but it does not read OpenSSH
 //! config files. The config file can change the behavior of how OpenSSH
-//! handles known_hosts files. For example, some things we don't handle:
+//! handles `known_hosts` files. For example, some things we don't handle:
 //!
 //! - `GlobalKnownHostsFile` — Changes the location of the global host file.
 //! - `UserKnownHostsFile` — Changes the location of the user's host file.
@@ -22,7 +22,8 @@
 //! added (it just adds a little complexity). For example, hostname patterns,
 //! and revoked markers. See "FIXME" comments littered in this file.
 
-use crate::util::config::{Config, Definition, Value};
+use crate::util::context::{Definition, GlobalContext, Value};
+use crate::CargoResult;
 use base64::engine::general_purpose::STANDARD;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use base64::Engine as _;
@@ -99,7 +100,7 @@ enum KnownHostError {
 
 impl From<anyhow::Error> for KnownHostError {
     fn from(err: anyhow::Error) -> KnownHostError {
-        KnownHostError::CheckError(err.into())
+        KnownHostError::CheckError(err)
     }
 }
 
@@ -131,13 +132,13 @@ impl Display for KnownHostLocation {
 
 /// The git2 callback used to validate a certificate (only ssh known hosts are validated).
 pub fn certificate_check(
-    config: &Config,
+    gctx: &GlobalContext,
     cert: &Cert<'_>,
     host: &str,
     port: Option<u16>,
     config_known_hosts: Option<&Vec<Value<String>>>,
     diagnostic_home_config: &str,
-) -> Result<CertificateCheckStatus, git2::Error> {
+) -> CargoResult<CertificateCheckStatus> {
     let Some(host_key) = cert.as_hostkey() else {
         // Return passthrough for TLS X509 certificates to use whatever validation
         // was done in git2.
@@ -150,17 +151,12 @@ pub fn certificate_check(
         _ => host.to_string(),
     };
     // The error message must be constructed as a string to pass through the libgit2 C API.
-    let err_msg = match check_ssh_known_hosts(
-        config,
-        host_key,
-        &host_maybe_port,
-        config_known_hosts,
-    ) {
+    match check_ssh_known_hosts(gctx, host_key, &host_maybe_port, config_known_hosts) {
         Ok(()) => {
             return Ok(CertificateCheckStatus::CertificateOk);
         }
         Err(KnownHostError::CheckError(e)) => {
-            format!("error: failed to validate host key:\n{:#}", e)
+            anyhow::bail!("error: failed to validate host key:\n{:#}", e)
         }
         Err(KnownHostError::HostKeyNotFound {
             hostname,
@@ -172,7 +168,7 @@ pub fn certificate_check(
             // Try checking without the port.
             if port.is_some()
                 && !matches!(port, Some(22))
-                && check_ssh_known_hosts(config, host_key, host, config_known_hosts).is_ok()
+                && check_ssh_known_hosts(gctx, host_key, host, config_known_hosts).is_ok()
             {
                 return Ok(CertificateCheckStatus::CertificateOk);
             }
@@ -197,7 +193,7 @@ pub fn certificate_check(
                 }
                 msg
             };
-            format!("error: unknown SSH host key\n\
+            anyhow::bail!("error: unknown SSH host key\n\
                 The SSH host key for `{hostname}` is not known and cannot be validated.\n\
                 \n\
                 To resolve this issue, add the host key to {known_hosts_location}\n\
@@ -246,7 +242,7 @@ pub fn certificate_check(
                     )
                 }
             };
-            format!("error: SSH host key has changed for `{hostname}`\n\
+            anyhow::bail!("error: SSH host key has changed for `{hostname}`\n\
                 *********************************\n\
                 * WARNING: HOST KEY HAS CHANGED *\n\
                 *********************************\n\
@@ -278,7 +274,7 @@ pub fn certificate_check(
             location,
         }) => {
             let key_type_short_name = key_type.short_name();
-            format!(
+            anyhow::bail!(
                 "error: Key has been revoked for `{hostname}`\n\
                 **************************************\n\
                 * WARNING: REVOKED HOST KEY DETECTED *\n\
@@ -292,7 +288,7 @@ pub fn certificate_check(
             )
         }
         Err(KnownHostError::HostHasOnlyCertAuthority { hostname, location }) => {
-            format!("error: Found a `@cert-authority` marker for `{hostname}`\n\
+            anyhow::bail!("error: Found a `@cert-authority` marker for `{hostname}`\n\
                 \n\
                 Cargo doesn't support certificate authorities for host key verification. It is\n\
                 recommended that the command line Git client is used instead. This can be achieved\n\
@@ -304,17 +300,12 @@ pub fn certificate_check(
                 for more information.\n\
                 ")
         }
-    };
-    Err(git2::Error::new(
-        git2::ErrorCode::GenericError,
-        git2::ErrorClass::Callback,
-        err_msg,
-    ))
+    }
 }
 
 /// Checks if the given host/host key pair is known.
 fn check_ssh_known_hosts(
-    config: &Config,
+    gctx: &GlobalContext,
     cert_host_key: &git2::cert::CertHostkey<'_>,
     host: &str,
     config_known_hosts: Option<&Vec<Value<String>>>,
@@ -326,7 +317,7 @@ fn check_ssh_known_hosts(
 
     // Collect all the known host entries from disk.
     let mut known_hosts = Vec::new();
-    for path in known_host_files(config) {
+    for path in known_host_files(gctx) {
         if !path.exists() {
             continue;
         }
@@ -500,9 +491,9 @@ fn check_ssh_known_hosts_loaded(
 }
 
 /// Returns a list of files to try loading OpenSSH-formatted known hosts.
-fn known_host_files(config: &Config) -> Vec<PathBuf> {
+fn known_host_files(gctx: &GlobalContext) -> Vec<PathBuf> {
     let mut result = Vec::new();
-    if config
+    if gctx
         .get_env_os("__CARGO_TEST_DISABLE_GLOBAL_KNOWN_HOST")
         .is_some()
     {
@@ -514,7 +505,7 @@ fn known_host_files(config: &Config) -> Vec<PathBuf> {
         // However, I do not know of a way to obtain that location from
         // Windows-land. The ProgramData version here is what the PowerShell
         // port of OpenSSH does.
-        if let Some(progdata) = config.get_env_os("ProgramData") {
+        if let Some(progdata) = gctx.get_env_os("ProgramData") {
             let mut progdata = PathBuf::from(progdata);
             progdata.push("ssh");
             progdata.push("ssh_known_hosts");
@@ -525,7 +516,7 @@ fn known_host_files(config: &Config) -> Vec<PathBuf> {
     result
 }
 
-/// The location of the user's known_hosts file.
+/// The location of the user's `known_hosts` file.
 fn user_known_host_location() -> Option<PathBuf> {
     // NOTE: This is a potentially inaccurate prediction of what the user
     // actually wants. The actual location depends on several factors:
@@ -538,7 +529,7 @@ fn user_known_host_location() -> Option<PathBuf> {
     // - OpenSSH (most unix platforms): Uses `pw->pw_dir` from `getpwuid()`.
     //
     // This doesn't do anything close to that. home_dir's behavior is:
-    // - Windows: $USERPROFILE, or SHGetFolderPathW()
+    // - Windows: $USERPROFILE, or SHGetKnownFolderPath()
     // - Unix: $HOME, or getpwuid_r()
     //
     // Since there is a mismatch here, the location returned here might be
@@ -628,7 +619,7 @@ fn hashed_hostname_matches(host: &str, hashed: &str) -> bool {
     hashed_host == &result[..]
 }
 
-/// Loads an OpenSSH known_hosts file.
+/// Loads an OpenSSH `known_hosts` file.
 fn load_hostfile(path: &Path) -> Result<Vec<KnownHost>, anyhow::Error> {
     let contents = cargo_util::paths::read(path)?;
     Ok(load_hostfile_contents(path, &contents))

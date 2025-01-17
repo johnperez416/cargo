@@ -1,5 +1,6 @@
 //! -Zadvanced-env tests
 
+use cargo_test_support::prelude::*;
 use cargo_test_support::{paths, project, registry::Package};
 
 #[cargo_test]
@@ -12,6 +13,7 @@ fn source_config_env() {
             [package]
             name = "foo"
             version = "0.1.0"
+            edition = "2015"
 
             [dependencies]
             somedep = "1.0"

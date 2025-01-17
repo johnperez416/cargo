@@ -33,8 +33,8 @@ DESCRIPTION
        be updated with the flags specified.
 
        Upon successful invocation, the enabled (+) and disabled (-) features
-       <https://doc.rust-lang.org/cargo/reference/features.md> of the specified
-       dependency will be listed in the command’s output.
+       <https://doc.rust-lang.org/cargo/reference/features.html> of the
+       specified dependency will be listed in the command’s output.
 
 OPTIONS
    Source options
@@ -55,6 +55,14 @@ OPTIONS
            Filesystem path
            <https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#specifying-path-dependencies>
            to local crate to add.
+
+       --base base
+           The path base
+           <https://doc.rust-lang.org/cargo/reference/unstable.html#path-bases>
+           to use when adding a local crate.
+
+           Unstable (nightly-only)
+           <https://doc.rust-lang.org/cargo/reference/unstable.html#path-bases>
 
        --registry registry
            Name of the registry to use. Registry names are defined in Cargo
@@ -96,6 +104,23 @@ OPTIONS
            Mark the dependency as required
            <https://doc.rust-lang.org/cargo/reference/features.html#optional-dependencies>.
 
+       --public
+           Mark the dependency as public.
+
+           The dependency can be referenced in your library’s public API.
+
+           Unstable (nightly-only)
+           <https://doc.rust-lang.org/cargo/reference/unstable.html#public-dependency>
+
+       --no-public
+           Mark the dependency as private.
+
+           While you can use the crate in your implementation, it cannot be
+           referenced in your public API.
+
+           Unstable (nightly-only)
+           <https://doc.rust-lang.org/cargo/reference/unstable.html#public-dependency>
+
        --no-default-features
            Disable the default features
            <https://doc.rust-lang.org/cargo/reference/features.html#dependency-features>.
@@ -110,15 +135,6 @@ OPTIONS
            When adding multiple crates, the features for a specific crate may
            be enabled with package-name/feature-name syntax. This flag may be
            specified multiple times, which enables all specified features.
-
-       --ignore-rust-version
-           Ignore rust-version specification in packages.
-
-           This option is unstable and available only on the nightly channel
-           <https://doc.rust-lang.org/book/appendix-07-nightly-rust.html> and
-           requires the -Z unstable-options flag to enable. See
-           <https://github.com/rust-lang/cargo/issues/5579> for more
-           information.
 
    Display Options
        -v, --verbose
@@ -154,16 +170,22 @@ OPTIONS
        -p spec, --package spec
            Add dependencies to only the specified package.
 
-       --frozen, --locked
-           Either of these flags requires that the Cargo.lock file is
-           up-to-date. If the lock file is missing, or it needs to be updated,
-           Cargo will exit with an error. The --frozen flag also prevents Cargo
-           from attempting to access the network to determine if it is
-           out-of-date.
+       --ignore-rust-version
+           Ignore rust-version specification in packages.
 
-           These may be used in environments where you want to assert that the
-           Cargo.lock file is up-to-date (such as a CI build) or want to avoid
-           network access.
+       --locked
+           Asserts that the exact same dependencies and versions are used as
+           when the existing Cargo.lock file was originally generated. Cargo
+           will exit with an error when either of the following scenarios
+           arises:
+
+           o  The lock file is missing.
+
+           o  Cargo attempted to change the lock file due to a different
+              dependency resolution.
+
+           It may be used in environments where deterministic builds are
+           desired, such as in CI pipelines.
 
        --offline
            Prevents Cargo from accessing the network for any reason. Without
@@ -179,6 +201,24 @@ OPTIONS
 
            May also be specified with the net.offline config value
            <https://doc.rust-lang.org/cargo/reference/config.html>.
+
+       --frozen
+           Equivalent to specifying both --locked and --offline.
+
+       --lockfile-path PATH
+           Changes the path of the lockfile from the default
+           (<workspace_root>/Cargo.lock) to PATH. PATH must end with Cargo.lock
+           (e.g. --lockfile-path /tmp/temporary-lockfile/Cargo.lock). Note that
+           providing --lockfile-path will ignore existing lockfile at the
+           default path, and instead will either use the lockfile from PATH, or
+           write a new lockfile into the provided PATH if it doesn’t exist.
+           This flag can be used to run most commands in read-only directories,
+           writing lockfile into the provided PATH.
+
+           This option is only available on the nightly channel
+           <https://doc.rust-lang.org/book/appendix-07-nightly-rust.html> and
+           requires the -Z unstable-options flag to enable (see #14421
+           <https://github.com/rust-lang/cargo/issues/14421>).
 
    Common Options
        +toolchain

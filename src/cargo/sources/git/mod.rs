@@ -2,13 +2,13 @@
 //!
 //! Apparently, the most important type in this module is [`GitSource`].
 //! [`utils`] provides libgit2 utilities like fetch and checkout, whereas
-//! [`oxide`] is the couterpart for gitoxide integration. [`known_hosts`]
+//! [`oxide`] is the counterpart for gitoxide integration. [`known_hosts`]
 //! is the mitigation of [CVE-2022-46176].
 //!
 //! [CVE-2022-46176]: https://blog.rust-lang.org/2023/01/10/cve-2022-46176.html
 
 pub use self::source::GitSource;
-pub use self::utils::{fetch, GitCheckout, GitDatabase, GitRemote};
+pub use self::utils::{fetch, resolve_ref, GitCheckout, GitDatabase, GitRemote};
 mod known_hosts;
 mod oxide;
 mod source;
@@ -16,8 +16,8 @@ mod utils;
 
 /// For `-Zgitoxide` integration.
 pub mod fetch {
-    use crate::core::features::GitoxideFeatures;
-    use crate::Config;
+    use crate::core::features::GitFeatures;
+    use crate::GlobalContext;
 
     /// The kind remote repository to fetch.
     #[derive(Debug, Copy, Clone)]
@@ -35,20 +35,20 @@ pub mod fetch {
         pub(crate) fn to_shallow_setting(
             &self,
             repo_is_shallow: bool,
-            config: &Config,
+            gctx: &GlobalContext,
         ) -> gix::remote::fetch::Shallow {
-            let has_feature = |cb: &dyn Fn(GitoxideFeatures) -> bool| {
-                config
-                    .cli_unstable()
-                    .gitoxide
+            let has_feature = |cb: &dyn Fn(GitFeatures) -> bool| {
+                gctx.cli_unstable()
+                    .git
                     .map_or(false, |features| cb(features))
             };
 
             // maintain shallow-ness and keep downloading single commits, or see if we can do shallow clones
             if !repo_is_shallow {
                 match self {
-                    RemoteKind::GitDependency if has_feature(&|git| git.shallow_deps) => {}
-                    RemoteKind::Registry if has_feature(&|git| git.shallow_index) => {}
+                    RemoteKind::GitDependency if has_feature(&|features| features.shallow_deps) => {
+                    }
+                    RemoteKind::Registry if has_feature(&|features| features.shallow_index) => {}
                     _ => return gix::remote::fetch::Shallow::NoChange,
                 }
             };

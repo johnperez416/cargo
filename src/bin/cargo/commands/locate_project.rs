@@ -14,9 +14,11 @@ pub fn cli() -> Command {
             )
             .value_name("FMT"),
         )
-        .arg_quiet()
+        .arg_silent_suggestion()
         .arg_manifest_path()
-        .after_help("Run `cargo help locate-project` for more detailed information.\n")
+        .after_help(color_print::cstr!(
+            "Run `<cyan,bold>cargo help locate-project</>` for more detailed information.\n"
+        ))
 }
 
 #[derive(Serialize)]
@@ -24,16 +26,16 @@ pub struct ProjectLocation<'a> {
     root: &'a str,
 }
 
-pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
+pub fn exec(gctx: &mut GlobalContext, args: &ArgMatches) -> CliResult {
     let root_manifest;
     let workspace;
     let root = match WhatToFind::parse(args) {
         WhatToFind::CurrentManifest => {
-            root_manifest = args.root_manifest(config)?;
+            root_manifest = args.root_manifest(gctx)?;
             &root_manifest
         }
         WhatToFind::Workspace => {
-            workspace = args.workspace(config)?;
+            workspace = args.workspace(gctx)?;
             workspace.root_manifest()
         }
     };
@@ -51,8 +53,8 @@ pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
     let location = ProjectLocation { root };
 
     match MessageFormat::parse(args)? {
-        MessageFormat::Json => config.shell().print_json(&location)?,
-        MessageFormat::Plain => drop_println!(config, "{}", location.root),
+        MessageFormat::Json => gctx.shell().print_json(&location)?,
+        MessageFormat::Plain => drop_println!(gctx, "{}", location.root),
     }
 
     Ok(())

@@ -24,8 +24,8 @@ installed, and all executables are installed into the installation root's
 {{> description-install-root }}
 
 There are multiple sources from which a crate can be installed. The default
-location is crates.io but the `--git`, `--path`, and `--registry` flags can
-change this source. If the source contains more than one package (such as
+source location is crates.io but the `--git`, `--path`, and `--registry` flags
+can change this source. If the source contains more than one package (such as
 crates.io or a git repository with multiple crates) the _crate_ argument is
 required to indicate which crate should be installed.
 
@@ -90,7 +90,7 @@ will be used, beginning discovery at `$PATH/.cargo/config.toml`.
 
 {{#option "`--vers` _version_" "`--version` _version_" }}
 Specify a version to install. This may be a [version
-requirement](../reference/specifying-dependencies.md), like `~1.2`, to have Cargo
+requirement](../reference/specifying-dependencies.html), like `~1.2`, to have Cargo
 select the newest version from the given requirement. If the version does not
 have a requirement operator (such as `^` or `~`), then it must be in the form
 _MAJOR.MINOR.PATCH_, and will install exactly that version; it is *not*
@@ -114,11 +114,15 @@ Specific commit to use when installing from git.
 {{/option}}
 
 {{#option "`--path` _path_" }}
-Filesystem path to local crate to install.
+Filesystem path to local crate to install from.
 {{/option}}
 
 {{#option "`--list`" }}
 List all installed packages and their versions.
+{{/option}}
+
+{{#option "`-n`" "`--dry-run`" }}
+(unstable) Perform all checks without installing.
 {{/option}}
 
 {{#option "`-f`" "`--force`" }}
@@ -180,8 +184,6 @@ See also the `--profile` option for choosing a specific profile by name.
 
 {{> options-profile }}
 
-{{> options-ignore-rust-version }}
-
 {{> options-timings }}
 
 {{/options}}
@@ -189,6 +191,8 @@ See also the `--profile` option for choosing a specific profile by name.
 ### Manifest Options
 
 {{#options}}
+{{> options-ignore-rust-version }}
+
 {{> options-locked }}
 {{/options}}
 

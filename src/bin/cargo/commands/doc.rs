@@ -16,9 +16,8 @@ pub fn cli() -> Command {
             "Don't build documentation for dependencies",
         ))
         .arg(flag("document-private-items", "Document private items"))
-        .arg_ignore_rust_version()
         .arg_message_format()
-        .arg_quiet()
+        .arg_silent_suggestion()
         .arg_package_spec(
             "Package to document",
             "Document all packages in the workspace",
@@ -40,20 +39,25 @@ pub fn cli() -> Command {
         .arg_unit_graph()
         .arg_timings()
         .arg_manifest_path()
-        .after_help("Run `cargo help doc` for more detailed information.\n")
+        .arg_lockfile_path()
+        .arg_ignore_rust_version()
+        .after_help(color_print::cstr!(
+            "Run `<cyan,bold>cargo help doc</>` for more detailed information.\n"
+        ))
 }
 
-pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
-    let ws = args.workspace(config)?;
+pub fn exec(gctx: &mut GlobalContext, args: &ArgMatches) -> CliResult {
+    let ws = args.workspace(gctx)?;
     let mode = CompileMode::Doc {
         deps: !args.flag("no-deps"),
+        json: false,
     };
-    let mut compile_opts =
-        args.compile_options(config, mode, Some(&ws), ProfileChecking::Custom)?;
+    let mut compile_opts = args.compile_options(gctx, mode, Some(&ws), ProfileChecking::Custom)?;
     compile_opts.rustdoc_document_private_items = args.flag("document-private-items");
 
     let doc_opts = DocOptions {
         open_result: args.flag("open"),
+        output_format: ops::OutputFormat::Html,
         compile_opts,
     };
     ops::doc(&ws, &doc_opts)?;

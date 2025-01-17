@@ -13,7 +13,10 @@ pub fn cli() -> Command {
             .value_name("SPEC")
             .help_heading(heading::PACKAGE_SELECTION)
             .group("package-group")
-            .help("Package to update")])
+            .help("Package to update")
+            .add(clap_complete::ArgValueCandidates::new(
+                get_pkg_id_spec_candidates,
+            ))])
         .arg(
             optional_multi_opt("package", "SPEC", "Package to update")
                 .short('p')
@@ -24,9 +27,10 @@ pub fn cli() -> Command {
         .arg_dry_run("Don't actually write the lockfile")
         .arg(
             flag(
-                "aggressive",
+                "recursive",
                 "Force updating all dependencies of [SPEC]... as well",
             )
+            .alias("aggressive")
             .conflicts_with("precise"),
         )
         .arg(
@@ -34,18 +38,29 @@ pub fn cli() -> Command {
                 .value_name("PRECISE")
                 .requires("package-group"),
         )
-        .arg_quiet()
+        .arg(
+            flag(
+                "breaking",
+                "Update [SPEC] to latest SemVer-breaking version (unstable)",
+            )
+            .short('b'),
+        )
+        .arg_silent_suggestion()
         .arg(
             flag("workspace", "Only update the workspace packages")
                 .short('w')
                 .help_heading(heading::PACKAGE_SELECTION),
         )
         .arg_manifest_path()
-        .after_help("Run `cargo help update` for more detailed information.\n")
+        .arg_lockfile_path()
+        .arg_ignore_rust_version_with_help("Ignore `rust-version` specification in packages")
+        .after_help(color_print::cstr!(
+            "Run `<cyan,bold>cargo help update</>` for more detailed information.\n"
+        ))
 }
 
-pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
-    let ws = args.workspace(config)?;
+pub fn exec(gctx: &mut GlobalContext, args: &ArgMatches) -> CliResult {
+    let mut ws = args.workspace(gctx)?;
 
     if args.is_present_with_zero_values("package") {
         print_available_packages(&ws)?;
@@ -68,13 +83,31 @@ pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
     }
 
     let update_opts = UpdateOptions {
-        aggressive: args.flag("aggressive"),
+        recursive: args.flag("recursive"),
         precise: args.get_one::<String>("precise").map(String::as_str),
         to_update,
         dry_run: args.dry_run(),
         workspace: args.flag("workspace"),
-        config,
+        gctx,
     };
-    ops::update_lockfile(&ws, &update_opts)?;
+
+    if args.flag("breaking") {
+        gctx.cli_unstable()
+            .fail_if_stable_opt("--breaking", 12425)?;
+
+        let upgrades = ops::upgrade_manifests(&mut ws, &update_opts.to_update)?;
+        ops::resolve_ws(&ws, update_opts.dry_run)?;
+        ops::write_manifest_upgrades(&ws, &upgrades, update_opts.dry_run)?;
+
+        if update_opts.dry_run {
+            update_opts
+                .gctx
+                .shell()
+                .warn("aborting update due to dry run")?;
+        }
+    } else {
+        ops::update_lockfile(&ws, &update_opts)?;
+    }
+
     Ok(())
 }

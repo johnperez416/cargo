@@ -10,6 +10,7 @@ pub fn cli() -> Command {
         .about("Compile a package, and pass extra options to the compiler")
         .arg(
             Arg::new("args")
+                .value_name("ARGS")
                 .num_args(0..)
                 .help("Extra rustc flags")
                 .trailing_var_arg(true),
@@ -27,9 +28,8 @@ pub fn cli() -> Command {
             "Comma separated list of types of crates for the compiler to emit",
         ))
         .arg_future_incompat_report()
-        .arg_ignore_rust_version()
         .arg_message_format()
-        .arg_quiet()
+        .arg_silent_suggestion()
         .arg_package("Package to build")
         .arg_targets_all(
             "Build only this package's library",
@@ -38,9 +38,9 @@ pub fn cli() -> Command {
             "Build only the specified example",
             "Build all examples",
             "Build only the specified test target",
-            "Build all tests",
+            "Build all targets that have `test = true` set",
             "Build only the specified bench target",
-            "Build all benches",
+            "Build all targets that have `bench = true` set",
             "Build all targets",
         )
         .arg_features()
@@ -52,11 +52,15 @@ pub fn cli() -> Command {
         .arg_unit_graph()
         .arg_timings()
         .arg_manifest_path()
-        .after_help("Run `cargo help rustc` for more detailed information.\n")
+        .arg_lockfile_path()
+        .arg_ignore_rust_version()
+        .after_help(color_print::cstr!(
+            "Run `<cyan,bold>cargo help rustc</>` for more detailed information.\n"
+        ))
 }
 
-pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
-    let ws = args.workspace(config)?;
+pub fn exec(gctx: &mut GlobalContext, args: &ArgMatches) -> CliResult {
+    let ws = args.workspace(gctx)?;
     // This is a legacy behavior that changes the behavior based on the profile.
     // If we want to support this more formally, I think adding a --mode flag
     // would be warranted.
@@ -67,7 +71,7 @@ pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
         _ => CompileMode::Build,
     };
     let mut compile_opts = args.compile_options_for_single_package(
-        config,
+        gctx,
         mode,
         Some(&ws),
         ProfileChecking::LegacyRustc,
@@ -82,13 +86,21 @@ pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
         Some(target_args)
     };
     if let Some(opt_value) = args.get_one::<String>(PRINT_ARG_NAME) {
-        config
-            .cli_unstable()
+        gctx.cli_unstable()
             .fail_if_stable_opt(PRINT_ARG_NAME, 9357)?;
         ops::print(&ws, &compile_opts, opt_value)?;
         return Ok(());
     }
-    let crate_types = values(args, CRATE_TYPE_ARG_NAME);
+
+    let crate_types = args
+        .get_many::<String>(CRATE_TYPE_ARG_NAME)
+        .into_iter()
+        .flatten()
+        .flat_map(|s| s.split(','))
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect::<Vec<String>>();
+
     compile_opts.target_rustc_crate_types = if crate_types.is_empty() {
         None
     } else {

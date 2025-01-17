@@ -96,6 +96,9 @@ Prune the given package from the display of the dependency tree.
 {{#option "`--depth` _depth_" }}
 Maximum display depth of the dependency tree. A depth of 1 displays the direct
 dependencies, for example.
+
+If the given value is `workspace`, only shows the dependencies that are member
+of the current workspace, instead.
 {{/option}}
 
 {{#option "`--no-dedupe`" }}
@@ -150,7 +153,7 @@ The default is the host platform. Use the value `all` to include *all* targets.
 
 {{#option "`--charset` _charset_" }}
 Chooses the character set to use for the tree. Valid values are "utf8" or
-"ascii". Default is "utf8".
+"ascii". When unspecified, cargo will auto-select a value.
 {{/option}}
 
 {{#option "`-f` _format_" "`--format` _format_" }}
@@ -186,6 +189,7 @@ Sets how each line is displayed. The _prefix_ value can be one of:
 
 {{> options-locked }}
 
+{{> options-lockfile-path }}
 {{/options}}
 
 {{> section-features }}

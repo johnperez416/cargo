@@ -1,5 +1,4 @@
 # cargo-test(1)
-
 ## NAME
 
 cargo-test --- Execute unit and integration tests of a package
@@ -88,7 +87,6 @@ as a whole.</dd>
 
 </dl>
 
-
 ### Package Selection
 
 By default, when no package selection options are given, the packages selected
@@ -108,7 +106,7 @@ virtual workspace will include all workspace members (equivalent to passing
 <dt class="option-term" id="option-cargo-test---package"><a class="option-anchor" href="#option-cargo-test---package"></a><code>--package</code> <em>spec</em>…</dt>
 <dd class="option-desc">Test only the specified packages. See <a href="cargo-pkgid.html">cargo-pkgid(1)</a> for the
 SPEC format. This flag may be specified multiple times and supports common Unix
-glob patterns like <code>*</code>, <code>?</code> and <code>[]</code>. However, to avoid your shell accidentally 
+glob patterns like <code>*</code>, <code>?</code> and <code>[]</code>. However, to avoid your shell accidentally
 expanding glob patterns before Cargo handles them, you must use single quotes or
 double quotes around each pattern.</dd>
 
@@ -117,10 +115,8 @@ double quotes around each pattern.</dd>
 <dd class="option-desc">Test all members in the workspace.</dd>
 
 
-
 <dt class="option-term" id="option-cargo-test---all"><a class="option-anchor" href="#option-cargo-test---all"></a><code>--all</code></dt>
 <dd class="option-desc">Deprecated alias for <code>--workspace</code>.</dd>
-
 
 
 <dt class="option-term" id="option-cargo-test---exclude"><a class="option-anchor" href="#option-cargo-test---exclude"></a><code>--exclude</code> <em>SPEC</em>…</dt>
@@ -132,7 +128,6 @@ single quotes or double quotes around each pattern.</dd>
 
 
 </dl>
-
 
 ### Target Selection
 
@@ -173,7 +168,6 @@ is set when the integration test is built so that it can use the
 [`env` macro](https://doc.rust-lang.org/std/macro.env.html) to locate the
 executable.
 
-
 Passing target selection flags will test only the specified
 targets. 
 
@@ -197,7 +191,6 @@ and supports common Unix glob patterns.</dd>
 <dd class="option-desc">Test all binary targets.</dd>
 
 
-
 <dt class="option-term" id="option-cargo-test---example"><a class="option-anchor" href="#option-cargo-test---example"></a><code>--example</code> <em>name</em>…</dt>
 <dd class="option-desc">Test the specified example. This flag may be specified multiple times
 and supports common Unix glob patterns.</dd>
@@ -213,7 +206,7 @@ multiple times and supports common Unix glob patterns.</dd>
 
 
 <dt class="option-term" id="option-cargo-test---tests"><a class="option-anchor" href="#option-cargo-test---tests"></a><code>--tests</code></dt>
-<dd class="option-desc">Test all targets in test mode that have the <code>test = true</code> manifest
+<dd class="option-desc">Test all targets that have the <code>test = true</code> manifest
 flag set. By default this includes the library and binaries built as
 unittests, and integration tests. Be aware that this will also build any
 required dependencies, so the lib target may be built twice (once as a
@@ -228,7 +221,7 @@ times and supports common Unix glob patterns.</dd>
 
 
 <dt class="option-term" id="option-cargo-test---benches"><a class="option-anchor" href="#option-cargo-test---benches"></a><code>--benches</code></dt>
-<dd class="option-desc">Test all targets in benchmark mode that have the <code>bench = true</code>
+<dd class="option-desc">Test all targets that have the <code>bench = true</code>
 manifest flag set. By default this includes the library and binaries built
 as benchmarks, and bench targets. Be aware that this will also build any
 required dependencies, so the lib target may be built twice (once as a
@@ -242,7 +235,6 @@ manifest settings for the target.</dd>
 
 
 </dl>
-
 
 <dl>
 
@@ -281,7 +273,6 @@ be specified multiple times, which enables all specified features.</dd>
 
 </dl>
 
-
 ### Compilation Options
 
 <dl>
@@ -294,8 +285,7 @@ list of supported targets. This flag may be specified multiple times.</p>
 <a href="../reference/config.html">config value</a>.</p>
 <p>Note that specifying this flag makes Cargo run in a different mode where the
 target artifacts are placed in a separate directory. See the
-<a href="../guide/build-cache.html">build cache</a> documentation for more details.</dd>
-
+<a href="../reference/build-cache.html">build cache</a> documentation for more details.</dd>
 
 
 <dt class="option-term" id="option-cargo-test--r"><a class="option-anchor" href="#option-cargo-test--r"></a><code>-r</code></dt>
@@ -304,17 +294,9 @@ target artifacts are placed in a separate directory. See the
 See also the <code>--profile</code> option for choosing a specific profile by name.</dd>
 
 
-
 <dt class="option-term" id="option-cargo-test---profile"><a class="option-anchor" href="#option-cargo-test---profile"></a><code>--profile</code> <em>name</em></dt>
 <dd class="option-desc">Test with the given profile.
-See the <a href="../reference/profiles.html">the reference</a> for more details on profiles.</dd>
-
-
-
-<dt class="option-term" id="option-cargo-test---ignore-rust-version"><a class="option-anchor" href="#option-cargo-test---ignore-rust-version"></a><code>--ignore-rust-version</code></dt>
-<dd class="option-desc">Test the target even if the selected Rust compiler is older than the
-required Rust version as configured in the project’s <code>rust-version</code> field.</dd>
-
+See <a href="../reference/profiles.html">the reference</a> for more details on profiles.</dd>
 
 
 <dt class="option-term" id="option-cargo-test---timings=fmts"><a class="option-anchor" href="#option-cargo-test---timings=fmts"></a><code>--timings=</code><em>fmts</em></dt>
@@ -335,7 +317,6 @@ information about timing information.</li>
 
 
 
-
 </dl>
 
 ### Output Options
@@ -346,7 +327,6 @@ information about timing information.</li>
 specified with the <code>CARGO_TARGET_DIR</code> environment variable, or the
 <code>build.target-dir</code> <a href="../reference/config.html">config value</a>.
 Defaults to <code>target</code> in the root of the workspace.</dd>
-
 
 </dl>
 
@@ -387,7 +367,6 @@ terminal.</li>
 <a href="../reference/config.html">config value</a>.</dd>
 
 
-
 <dt class="option-term" id="option-cargo-test---message-format"><a class="option-anchor" href="#option-cargo-test---message-format"></a><code>--message-format</code> <em>fmt</em></dt>
 <dd class="option-desc">The output format for diagnostic messages. Can be specified multiple times
 and consists of comma-separated values. Valid values:</p>
@@ -411,7 +390,6 @@ coming from rustc are still emitted. Cannot be used with <code>human</code> or <
 </ul></dd>
 
 
-
 </dl>
 
 ### Manifest Options
@@ -423,16 +401,20 @@ coming from rustc are still emitted. Cannot be used with <code>human</code> or <
 <code>Cargo.toml</code> file in the current directory or any parent directory.</dd>
 
 
+<dt class="option-term" id="option-cargo-test---ignore-rust-version"><a class="option-anchor" href="#option-cargo-test---ignore-rust-version"></a><code>--ignore-rust-version</code></dt>
+<dd class="option-desc">Ignore <code>rust-version</code> specification in packages.</dd>
 
-<dt class="option-term" id="option-cargo-test---frozen"><a class="option-anchor" href="#option-cargo-test---frozen"></a><code>--frozen</code></dt>
+
 <dt class="option-term" id="option-cargo-test---locked"><a class="option-anchor" href="#option-cargo-test---locked"></a><code>--locked</code></dt>
-<dd class="option-desc">Either of these flags requires that the <code>Cargo.lock</code> file is
-up-to-date. If the lock file is missing, or it needs to be updated, Cargo will
-exit with an error. The <code>--frozen</code> flag also prevents Cargo from
-attempting to access the network to determine if it is out-of-date.</p>
-<p>These may be used in environments where you want to assert that the
-<code>Cargo.lock</code> file is up-to-date (such as a CI build) or want to avoid network
-access.</dd>
+<dd class="option-desc">Asserts that the exact same dependencies and versions are used as when the
+existing <code>Cargo.lock</code> file was originally generated. Cargo will exit with an
+error when either of the following scenarios arises:</p>
+<ul>
+<li>The lock file is missing.</li>
+<li>Cargo attempted to change the lock file due to a different dependency resolution.</li>
+</ul>
+<p>It may be used in environments where deterministic builds are desired,
+such as in CI pipelines.</dd>
 
 
 <dt class="option-term" id="option-cargo-test---offline"><a class="option-anchor" href="#option-cargo-test---offline"></a><code>--offline</code></dt>
@@ -447,6 +429,21 @@ See the <a href="cargo-fetch.html">cargo-fetch(1)</a> command to download depend
 offline.</p>
 <p>May also be specified with the <code>net.offline</code> <a href="../reference/config.html">config value</a>.</dd>
 
+
+<dt class="option-term" id="option-cargo-test---frozen"><a class="option-anchor" href="#option-cargo-test---frozen"></a><code>--frozen</code></dt>
+<dd class="option-desc">Equivalent to specifying both <code>--locked</code> and <code>--offline</code>.</dd>
+
+
+<dt class="option-term" id="option-cargo-test---lockfile-path"><a class="option-anchor" href="#option-cargo-test---lockfile-path"></a><code>--lockfile-path</code> <em>PATH</em></dt>
+<dd class="option-desc">Changes the path of the lockfile from the default (<code>&lt;workspace_root&gt;/Cargo.lock</code>) to <em>PATH</em>. <em>PATH</em> must end with
+<code>Cargo.lock</code> (e.g. <code>--lockfile-path /tmp/temporary-lockfile/Cargo.lock</code>). Note that providing
+<code>--lockfile-path</code> will ignore existing lockfile at the default path, and instead will
+either use the lockfile from <em>PATH</em>, or write a new lockfile into the provided <em>PATH</em> if it doesn’t exist.
+This flag can be used to run most commands in read-only directories, writing lockfile into the provided <em>PATH</em>.</p>
+<p>This option is only available on the <a href="https://doc.rust-lang.org/book/appendix-07-nightly-rust.html">nightly
+channel</a> and
+requires the <code>-Z unstable-options</code> flag to enable (see
+<a href="https://github.com/rust-lang/cargo/issues/14421">#14421</a>).</dd>
 
 
 </dl>
@@ -491,7 +488,6 @@ requires the <code>-Z unstable-options</code> flag to enable (see
 
 </dl>
 
-
 ### Miscellaneous Options
 
 The `--jobs` argument affects the building of the test executable but does not
@@ -511,12 +507,10 @@ parallel jobs to the number of logical CPUs plus provided value. If
 a string <code>default</code> is provided, it sets the value back to defaults.
 Should not be 0.</dd>
 
-
 <dt class="option-term" id="option-cargo-test---future-incompat-report"><a class="option-anchor" href="#option-cargo-test---future-incompat-report"></a><code>--future-incompat-report</code></dt>
 <dd class="option-desc">Displays a future-incompat report for any future-incompatible warnings
 produced during execution of this command</p>
 <p>See <a href="cargo-report.html">cargo-report(1)</a></dd>
-
 
 
 </dl>
@@ -534,12 +528,10 @@ build test binaries separately. For example:
 See [the reference](../reference/environment-variables.html) for
 details on environment variables that Cargo reads.
 
-
 ## EXIT STATUS
 
 * `0`: Cargo succeeded.
 * `101`: Cargo failed to complete.
-
 
 ## EXAMPLES
 

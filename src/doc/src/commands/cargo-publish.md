@@ -1,5 +1,4 @@
 # cargo-publish(1)
-
 ## NAME
 
 cargo-publish --- Upload a package to the registry
@@ -19,8 +18,11 @@ following steps:
    - Checks the `package.publish` key in the manifest for restrictions on
      which registries you are allowed to publish to.
 2. Create a `.crate` file by following the steps in [cargo-package(1)](cargo-package.html).
-3. Upload the crate to the registry. Note that the server will perform
-   additional checks on the crate.
+3. Upload the crate to the registry. The server will perform additional
+   checks on the crate. 
+4. The client will poll waiting for the package to appear in the index,
+   and may timeout. In that case, you will need to check for completion
+   manually. This timeout does not affect the upload.
 
 This command requires you to be authenticated with either the `--token` option
 or using [cargo-login(1)](cargo-login.html).
@@ -49,7 +51,6 @@ variables of the form <code>CARGO_REGISTRIES_NAME_TOKEN</code> where <code>NAME<
 of the registry in all capital letters.</dd>
 
 
-
 <dt class="option-term" id="option-cargo-publish---no-verify"><a class="option-anchor" href="#option-cargo-publish---no-verify"></a><code>--no-verify</code></dt>
 <dd class="option-desc">Don’t verify the contents by building them.</dd>
 
@@ -60,7 +61,6 @@ of the registry in all capital letters.</dd>
 
 <dt class="option-term" id="option-cargo-publish---index"><a class="option-anchor" href="#option-cargo-publish---index"></a><code>--index</code> <em>index</em></dt>
 <dd class="option-desc">The URL of the registry index to use.</dd>
-
 
 
 <dt class="option-term" id="option-cargo-publish---registry"><a class="option-anchor" href="#option-cargo-publish---registry"></a><code>--registry</code> <em>registry</em></dt>
@@ -77,19 +77,61 @@ which defaults to <code>crates-io</code>.</dd>
 
 ### Package Selection
 
-By default, the package in the current working directory is selected. The `-p`
-flag can be used to choose a different package in a workspace.
+By default, when no package selection options are given, the packages selected
+depend on the selected manifest file (based on the current working directory if
+`--manifest-path` is not given). If the manifest is the root of a workspace then
+the workspaces default members are selected, otherwise only the package defined
+by the manifest will be selected.
+
+The default members of a workspace can be set explicitly with the
+`workspace.default-members` key in the root manifest. If this is not set, a
+virtual workspace will include all workspace members (equivalent to passing
+`--workspace`), and a non-virtual workspace will include only the root crate itself.
+
+Selecting more than one package is unstable and available only on the
+[nightly channel](https://doc.rust-lang.org/book/appendix-07-nightly-rust.html)
+and requires the `-Z package-workspace` flag to enable.
+See <https://github.com/rust-lang/cargo/issues/10948> for more information.
+
 
 <dl>
 
-<dt class="option-term" id="option-cargo-publish--p"><a class="option-anchor" href="#option-cargo-publish--p"></a><code>-p</code> <em>spec</em></dt>
-<dt class="option-term" id="option-cargo-publish---package"><a class="option-anchor" href="#option-cargo-publish---package"></a><code>--package</code> <em>spec</em></dt>
-<dd class="option-desc">The package to publish. See <a href="cargo-pkgid.html">cargo-pkgid(1)</a> for the SPEC
-format.</dd>
+<dt class="option-term" id="option-cargo-publish--p"><a class="option-anchor" href="#option-cargo-publish--p"></a><code>-p</code> <em>spec</em>…</dt>
+<dt class="option-term" id="option-cargo-publish---package"><a class="option-anchor" href="#option-cargo-publish---package"></a><code>--package</code> <em>spec</em>…</dt>
+<dd class="option-desc">Publish only the specified packages. See <a href="cargo-pkgid.html">cargo-pkgid(1)</a> for the
+SPEC format. This flag may be specified multiple times and supports common Unix
+glob patterns like <code>*</code>, <code>?</code> and <code>[]</code>. However, to avoid your shell accidentally
+expanding glob patterns before Cargo handles them, you must use single quotes or
+double quotes around each pattern.</dd>
+
+
+Selecting more than one package with this option is unstable and available only
+on the
+[nightly channel](https://doc.rust-lang.org/book/appendix-07-nightly-rust.html)
+and requires the `-Z package-workspace` flag to enable.
+See <https://github.com/rust-lang/cargo/issues/10948> for more information.
+
+<dt class="option-term" id="option-cargo-publish---workspace"><a class="option-anchor" href="#option-cargo-publish---workspace"></a><code>--workspace</code></dt>
+<dd class="option-desc">Publish all members in the workspace.</p>
+<p>This option is unstable and available only on the
+<a href="https://doc.rust-lang.org/book/appendix-07-nightly-rust.html">nightly channel</a>
+and requires the <code>-Z package-workspace</code> flag to enable.
+See <a href="https://github.com/rust-lang/cargo/issues/10948">https://github.com/rust-lang/cargo/issues/10948</a> for more information.</dd>
+
+
+<dt class="option-term" id="option-cargo-publish---exclude"><a class="option-anchor" href="#option-cargo-publish---exclude"></a><code>--exclude</code> <em>SPEC</em>…</dt>
+<dd class="option-desc">Exclude the specified packages. Must be used in conjunction with the
+<code>--workspace</code> flag. This flag may be specified multiple times and supports
+common Unix glob patterns like <code>*</code>, <code>?</code> and <code>[]</code>. However, to avoid your shell
+accidentally expanding glob patterns before Cargo handles them, you must use
+single quotes or double quotes around each pattern.</p>
+<p>This option is unstable and available only on the
+<a href="https://doc.rust-lang.org/book/appendix-07-nightly-rust.html">nightly channel</a>
+and requires the <code>-Z package-workspace</code> flag to enable.
+See <a href="https://github.com/rust-lang/cargo/issues/10948">https://github.com/rust-lang/cargo/issues/10948</a> for more information.</dd>
 
 
 </dl>
-
 
 ### Compilation Options
 
@@ -103,8 +145,7 @@ list of supported targets. This flag may be specified multiple times.</p>
 <a href="../reference/config.html">config value</a>.</p>
 <p>Note that specifying this flag makes Cargo run in a different mode where the
 target artifacts are placed in a separate directory. See the
-<a href="../guide/build-cache.html">build cache</a> documentation for more details.</dd>
-
+<a href="../reference/build-cache.html">build cache</a> documentation for more details.</dd>
 
 
 <dt class="option-term" id="option-cargo-publish---target-dir"><a class="option-anchor" href="#option-cargo-publish---target-dir"></a><code>--target-dir</code> <em>directory</em></dt>
@@ -112,7 +153,6 @@ target artifacts are placed in a separate directory. See the
 specified with the <code>CARGO_TARGET_DIR</code> environment variable, or the
 <code>build.target-dir</code> <a href="../reference/config.html">config value</a>.
 Defaults to <code>target</code> in the root of the workspace.</dd>
-
 
 
 </dl>
@@ -145,7 +185,6 @@ be specified multiple times, which enables all specified features.</dd>
 
 </dl>
 
-
 ### Manifest Options
 
 <dl>
@@ -155,16 +194,16 @@ be specified multiple times, which enables all specified features.</dd>
 <code>Cargo.toml</code> file in the current directory or any parent directory.</dd>
 
 
-
-<dt class="option-term" id="option-cargo-publish---frozen"><a class="option-anchor" href="#option-cargo-publish---frozen"></a><code>--frozen</code></dt>
 <dt class="option-term" id="option-cargo-publish---locked"><a class="option-anchor" href="#option-cargo-publish---locked"></a><code>--locked</code></dt>
-<dd class="option-desc">Either of these flags requires that the <code>Cargo.lock</code> file is
-up-to-date. If the lock file is missing, or it needs to be updated, Cargo will
-exit with an error. The <code>--frozen</code> flag also prevents Cargo from
-attempting to access the network to determine if it is out-of-date.</p>
-<p>These may be used in environments where you want to assert that the
-<code>Cargo.lock</code> file is up-to-date (such as a CI build) or want to avoid network
-access.</dd>
+<dd class="option-desc">Asserts that the exact same dependencies and versions are used as when the
+existing <code>Cargo.lock</code> file was originally generated. Cargo will exit with an
+error when either of the following scenarios arises:</p>
+<ul>
+<li>The lock file is missing.</li>
+<li>Cargo attempted to change the lock file due to a different dependency resolution.</li>
+</ul>
+<p>It may be used in environments where deterministic builds are desired,
+such as in CI pipelines.</dd>
 
 
 <dt class="option-term" id="option-cargo-publish---offline"><a class="option-anchor" href="#option-cargo-publish---offline"></a><code>--offline</code></dt>
@@ -179,6 +218,21 @@ See the <a href="cargo-fetch.html">cargo-fetch(1)</a> command to download depend
 offline.</p>
 <p>May also be specified with the <code>net.offline</code> <a href="../reference/config.html">config value</a>.</dd>
 
+
+<dt class="option-term" id="option-cargo-publish---frozen"><a class="option-anchor" href="#option-cargo-publish---frozen"></a><code>--frozen</code></dt>
+<dd class="option-desc">Equivalent to specifying both <code>--locked</code> and <code>--offline</code>.</dd>
+
+
+<dt class="option-term" id="option-cargo-publish---lockfile-path"><a class="option-anchor" href="#option-cargo-publish---lockfile-path"></a><code>--lockfile-path</code> <em>PATH</em></dt>
+<dd class="option-desc">Changes the path of the lockfile from the default (<code>&lt;workspace_root&gt;/Cargo.lock</code>) to <em>PATH</em>. <em>PATH</em> must end with
+<code>Cargo.lock</code> (e.g. <code>--lockfile-path /tmp/temporary-lockfile/Cargo.lock</code>). Note that providing
+<code>--lockfile-path</code> will ignore existing lockfile at the default path, and instead will
+either use the lockfile from <em>PATH</em>, or write a new lockfile into the provided <em>PATH</em> if it doesn’t exist.
+This flag can be used to run most commands in read-only directories, writing lockfile into the provided <em>PATH</em>.</p>
+<p>This option is only available on the <a href="https://doc.rust-lang.org/book/appendix-07-nightly-rust.html">nightly
+channel</a> and
+requires the <code>-Z unstable-options</code> flag to enable (see
+<a href="https://github.com/rust-lang/cargo/issues/14421">#14421</a>).</dd>
 
 
 </dl>
@@ -195,7 +249,6 @@ parallel jobs to the number of logical CPUs plus provided value. If
 a string <code>default</code> is provided, it sets the value back to defaults.
 Should not be 0.</dd>
 
-
 <dt class="option-term" id="option-cargo-publish---keep-going"><a class="option-anchor" href="#option-cargo-publish---keep-going"></a><code>--keep-going</code></dt>
 <dd class="option-desc">Build as many crates in the dependency graph as possible, rather than aborting
 the build on the first one that fails to build.</p>
@@ -204,7 +257,6 @@ one of which fails to build, <code>cargo publish -j1</code> may or may not build
 one that succeeds (depending on which one of the two builds Cargo picked to run
 first), whereas <code>cargo publish -j1 --keep-going</code> would definitely run both
 builds, even if the one run first fails.</dd>
-
 
 </dl>
 
@@ -236,7 +288,6 @@ terminal.</li>
 </ul>
 <p>May also be specified with the <code>term.color</code>
 <a href="../reference/config.html">config value</a>.</dd>
-
 
 </dl>
 
@@ -280,18 +331,15 @@ requires the <code>-Z unstable-options</code> flag to enable (see
 
 </dl>
 
-
 ## ENVIRONMENT
 
 See [the reference](../reference/environment-variables.html) for
 details on environment variables that Cargo reads.
 
-
 ## EXIT STATUS
 
 * `0`: Cargo succeeded.
 * `101`: Cargo failed to complete.
-
 
 ## EXAMPLES
 

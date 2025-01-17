@@ -1,4 +1,10 @@
-use cargo::Config;
+//! > This crate is maintained by the Cargo team, primarily for use by Cargo
+//! > and not intended for external use. This
+//! > crate may make major changes to its APIs or be deprecated without warning.
+
+#![allow(clippy::disallowed_methods)]
+
+use cargo::GlobalContext;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -119,11 +125,15 @@ impl Fixtures {
             }
         } else {
             fs::create_dir_all(&index).unwrap();
-            git("init --bare");
+            // git 2.48.0 changed the behavior of setting HEAD when doing a
+            // fetch, so let's just force it to match
+            // crates.io-index-archive's default branch. This also accounts
+            // for users who may override init.defaultBranch.
+            git("init --bare --initial-branch=main");
             git("remote add origin https://github.com/rust-lang/crates.io-index-archive");
         }
         git(&format!("fetch origin {}", CRATES_IO_COMMIT));
-        git("branch -f master FETCH_HEAD");
+        git("branch -f main FETCH_HEAD");
     }
 
     /// This unpacks the compressed workspace skeletons into tmp/workspaces.
@@ -173,25 +183,24 @@ impl Fixtures {
             .collect()
     }
 
-    /// Creates a new Config.
-    pub fn make_config(&self, ws_root: &Path) -> Config {
+    /// Creates a new Context.
+    pub fn make_context(&self, ws_root: &Path) -> GlobalContext {
         let shell = cargo::core::Shell::new();
-        let mut config = Config::new(shell, ws_root.to_path_buf(), self.cargo_home());
+        let mut gctx = GlobalContext::new(shell, ws_root.to_path_buf(), self.cargo_home());
         // Configure is needed to set the target_dir which is needed to write
         // the .rustc_info.json file which is very expensive.
-        config
-            .configure(
-                0,
-                false,
-                None,
-                false,
-                false,
-                false,
-                &Some(self.target_dir()),
-                &[],
-                &[],
-            )
-            .unwrap();
-        config
+        gctx.configure(
+            0,
+            false,
+            None,
+            false,
+            false,
+            false,
+            &Some(self.target_dir()),
+            &[],
+            &[],
+        )
+        .unwrap();
+        gctx
     }
 }

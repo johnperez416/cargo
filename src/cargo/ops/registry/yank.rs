@@ -9,30 +9,30 @@ use cargo_credential::Operation;
 use cargo_credential::Secret;
 
 use crate::core::Workspace;
-use crate::util::config::Config;
+use crate::util::context::GlobalContext;
 use crate::util::errors::CargoResult;
 use crate::util::important_paths::find_root_manifest_for_wd;
 
+use super::RegistryOrIndex;
+
 pub fn yank(
-    config: &Config,
+    gctx: &GlobalContext,
     krate: Option<String>,
     version: Option<String>,
     token: Option<Secret<String>>,
-    index: Option<String>,
+    reg_or_index: Option<RegistryOrIndex>,
     undo: bool,
-    reg: Option<String>,
 ) -> CargoResult<()> {
     let name = match krate {
         Some(name) => name,
         None => {
-            let manifest_path = find_root_manifest_for_wd(config.cwd())?;
-            let ws = Workspace::new(&manifest_path, config)?;
+            let manifest_path = find_root_manifest_for_wd(gctx.cwd())?;
+            let ws = Workspace::new(&manifest_path, gctx)?;
             ws.current()?.package_id().name().to_string()
         }
     };
-    let version = match version {
-        Some(v) => v,
-        None => bail!("a version must be specified to yank"),
+    let Some(version) = version else {
+        bail!("a version must be specified to yank")
     };
 
     let message = if undo {
@@ -46,19 +46,19 @@ pub fn yank(
             vers: &version,
         }
     };
-
+    let source_ids = super::get_source_id(gctx, reg_or_index.as_ref())?;
     let (mut registry, _) = super::registry(
-        config,
+        gctx,
+        &source_ids,
         token.as_ref().map(Secret::as_deref),
-        index.as_deref(),
-        reg.as_deref(),
+        reg_or_index.as_ref(),
         true,
         Some(message),
     )?;
 
     let package_spec = format!("{}@{}", name, version);
     if undo {
-        config.shell().status("Unyank", package_spec)?;
+        gctx.shell().status("Unyank", package_spec)?;
         registry.unyank(&name, &version).with_context(|| {
             format!(
                 "failed to undo a yank from the registry at {}",
@@ -66,7 +66,7 @@ pub fn yank(
             )
         })?;
     } else {
-        config.shell().status("Yank", package_spec)?;
+        gctx.shell().status("Yank", package_spec)?;
         registry
             .yank(&name, &version)
             .with_context(|| format!("failed to yank from the registry at {}", registry.host()))?;

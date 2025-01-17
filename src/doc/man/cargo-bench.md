@@ -34,7 +34,7 @@ Benchmarks are built with the `--test` option to `rustc` which creates a
 special executable by linking your code with libtest. The executable
 automatically runs all functions annotated with the `#[bench]` attribute.
 Cargo passes the `--bench` flag to the test harness to tell it to run
-only benchmarks.
+only benchmarks, regardless of whether the harness is libtest or a custom harness.
 
 The libtest harness may be disabled by setting `harness = false` in the target
 manifest settings, in which case your code will need to provide its own `main`
@@ -90,7 +90,7 @@ in the manifest settings. Setting examples to `bench = true` will build and
 run the example as a benchmark, replacing the example's `main` function with
 the libtest harness.
 
-Setting targets to `bench = false` will stop them from being bencharmked by
+Setting targets to `bench = false` will stop them from being benchmarked by
 default. Target selection options that take a target by name (such as
 `--example foo`) ignore the `bench` flag and will always benchmark the given
 target.
@@ -111,8 +111,6 @@ for more information on per-target settings.
 {{> options-target-triple }}
 
 {{> options-profile }}
-
-{{> options-ignore-rust-version }}
 
 {{> options-timings }}
 
@@ -145,7 +143,11 @@ passing `--nocapture` to the benchmark binaries:
 {{#options}}
 {{> options-manifest-path }}
 
+{{> options-ignore-rust-version }}
+
 {{> options-locked }}
+
+{{> options-lockfile-path }}
 {{/options}}
 
 {{> section-options-common }}

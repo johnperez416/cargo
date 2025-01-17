@@ -7,25 +7,30 @@ use std::collections::BTreeSet;
 use std::collections::VecDeque;
 use std::fmt::Write;
 use std::path::Path;
+use std::str::FromStr;
 
 use anyhow::Context as _;
 use cargo_util::paths;
+use cargo_util_schemas::core::PartialVersion;
+use cargo_util_schemas::manifest::PathBaseName;
+use cargo_util_schemas::manifest::RustVersion;
 use indexmap::IndexSet;
 use itertools::Itertools;
-use termcolor::Color::Green;
-use termcolor::Color::Red;
-use termcolor::ColorSpec;
 use toml_edit::Item as TomlItem;
 
 use crate::core::dependency::DepKind;
 use crate::core::registry::PackageRegistry;
 use crate::core::FeatureValue;
+use crate::core::Features;
 use crate::core::Package;
-use crate::core::QueryKind;
 use crate::core::Registry;
 use crate::core::Shell;
 use crate::core::Summary;
 use crate::core::Workspace;
+use crate::sources::source::QueryKind;
+use crate::util::cache_lock::CacheLockMode;
+use crate::util::style;
+use crate::util::toml::lookup_path_base;
 use crate::util::toml_mut::dependency::Dependency;
 use crate::util::toml_mut::dependency::GitSource;
 use crate::util::toml_mut::dependency::MaybeWorkspace;
@@ -34,16 +39,15 @@ use crate::util::toml_mut::dependency::Source;
 use crate::util::toml_mut::dependency::WorkspaceSource;
 use crate::util::toml_mut::manifest::DepTable;
 use crate::util::toml_mut::manifest::LocalManifest;
-use crate::util::PartialVersion;
 use crate::CargoResult;
-use crate::Config;
+use crate::GlobalContext;
 use crate_spec::CrateSpec;
 
 /// Information on what dependencies should be added
 #[derive(Clone, Debug)]
 pub struct AddOptions<'a> {
     /// Configuration information for cargo operations
-    pub config: &'a Config,
+    pub gctx: &'a GlobalContext,
     /// Package to add dependencies to
     pub spec: &'a Package,
     /// Dependencies to add or modify
@@ -53,7 +57,7 @@ pub struct AddOptions<'a> {
     /// Act as if dependencies will be added
     pub dry_run: bool,
     /// Whether the minimum supported Rust version should be considered during resolution
-    pub honor_rust_version: bool,
+    pub honor_rust_version: Option<bool>,
 }
 
 /// Add dependencies to a manifest
@@ -76,10 +80,12 @@ pub fn add(workspace: &Workspace<'_>, options: &AddOptions<'_>) -> CargoResult<(
         );
     }
 
-    let mut registry = PackageRegistry::new(options.config)?;
+    let mut registry = workspace.package_registry()?;
 
     let deps = {
-        let _lock = options.config.acquire_package_cache_lock()?;
+        let _lock = options
+            .gctx
+            .acquire_package_cache_lock(CacheLockMode::DownloadExclusive)?;
         registry.lock_patches();
         options
             .dependencies
@@ -92,7 +98,7 @@ pub fn add(workspace: &Workspace<'_>, options: &AddOptions<'_>) -> CargoResult<(
                     &options.spec,
                     &options.section,
                     options.honor_rust_version,
-                    options.config,
+                    options.gctx,
                     &mut registry,
                 )
             })
@@ -104,14 +110,18 @@ pub fn add(workspace: &Workspace<'_>, options: &AddOptions<'_>) -> CargoResult<(
         .map(TomlItem::as_table)
         .map_or(true, |table_option| {
             table_option.map_or(true, |table| {
-                is_sorted(table.get_values().iter_mut().map(|(key, _)| {
-                    // get_values key paths always have at least one key.
-                    key.remove(0)
-                }))
+                table
+                    .get_values()
+                    .iter_mut()
+                    .map(|(key, _)| {
+                        // get_values key paths always have at least one key.
+                        key.remove(0)
+                    })
+                    .is_sorted()
             })
         });
     for dep in deps {
-        print_action_msg(&mut options.config.shell(), &dep, &dep_table)?;
+        print_action_msg(&mut options.gctx.shell(), &dep, &dep_table)?;
         if let Some(Source::Path(src)) = dep.source() {
             if src.path == manifest.path.parent().unwrap_or_else(|| Path::new("")) {
                 anyhow::bail!(
@@ -191,9 +201,33 @@ pub fn add(workspace: &Workspace<'_>, options: &AddOptions<'_>) -> CargoResult<(
             anyhow::bail!(message.trim().to_owned());
         }
 
-        print_dep_table_msg(&mut options.config.shell(), &dep)?;
+        print_dep_table_msg(&mut options.gctx.shell(), &dep)?;
 
-        manifest.insert_into_table(&dep_table, &dep)?;
+        manifest.insert_into_table(
+            &dep_table,
+            &dep,
+            workspace.gctx(),
+            workspace.root(),
+            options.spec.manifest().unstable_features(),
+        )?;
+        if dep.optional == Some(true) {
+            let is_namespaced_features_supported =
+                check_rust_version_for_optional_dependency(options.spec.rust_version())?;
+            if is_namespaced_features_supported {
+                let dep_key = dep.toml_key();
+                if !manifest.is_explicit_dep_activation(dep_key) {
+                    let table = manifest.get_table_mut(&[String::from("features")])?;
+                    let dep_name = dep.rename.as_deref().unwrap_or(&dep.name);
+                    let new_feature: toml_edit::Value =
+                        [format!("dep:{dep_name}")].iter().collect();
+                    table[dep_key] = toml_edit::value(new_feature);
+                    options
+                        .gctx
+                        .shell()
+                        .status("Adding", format!("feature `{dep_key}`"))?;
+                }
+            }
+        }
         manifest.gc_dep(dep.toml_key());
     }
 
@@ -207,7 +241,7 @@ pub fn add(workspace: &Workspace<'_>, options: &AddOptions<'_>) -> CargoResult<(
         }
     }
 
-    if options.config.locked() {
+    if options.gctx.locked() {
         let new_raw_manifest = manifest.to_string();
         if original_raw_manifest != new_raw_manifest {
             anyhow::bail!(
@@ -218,7 +252,7 @@ pub fn add(workspace: &Workspace<'_>, options: &AddOptions<'_>) -> CargoResult<(
     }
 
     if options.dry_run {
-        options.config.shell().warn("aborting add due to dry run")?;
+        options.gctx.shell().warn("aborting add due to dry run")?;
     } else {
         manifest.write()?;
     }
@@ -231,7 +265,7 @@ pub fn add(workspace: &Workspace<'_>, options: &AddOptions<'_>) -> CargoResult<(
 pub struct DepOp {
     /// Describes the crate
     pub crate_spec: Option<String>,
-    /// Dependency key, overriding the package name in crate_spec
+    /// Dependency key, overriding the package name in `crate_spec`
     pub rename: Option<String>,
 
     /// Feature flags to activate
@@ -242,11 +276,17 @@ pub struct DepOp {
     /// Whether dependency is optional
     pub optional: Option<bool>,
 
+    /// Whether dependency is public
+    pub public: Option<bool>,
+
     /// Registry for looking up dependency version
     pub registry: Option<String>,
 
-    /// Git repo for dependency
+    /// File system path for dependency
     pub path: Option<String>,
+    /// Specify a named base for a path dependency
+    pub base: Option<String>,
+
     /// Git repo for dependency
     pub git: Option<String>,
     /// Specify an alternative git branch
@@ -263,8 +303,8 @@ fn resolve_dependency(
     ws: &Workspace<'_>,
     spec: &Package,
     section: &DepTable,
-    honor_rust_version: bool,
-    config: &Config,
+    honor_rust_version: Option<bool>,
+    gctx: &GlobalContext,
     registry: &mut PackageRegistry<'_>,
 ) -> CargoResult<DependencyUI> {
     let crate_spec = arg
@@ -290,16 +330,16 @@ fn resolve_dependency(
                 anyhow::bail!("cannot specify a git URL (`{url}`) with a version (`{v}`).");
             }
             let dependency = crate_spec.to_dependency()?.set_source(src);
-            let selected = select_package(&dependency, config, registry)?;
+            let selected = select_package(&dependency, gctx, registry)?;
             if dependency.name != selected.name {
-                config.shell().warn(format!(
+                gctx.shell().warn(format!(
                     "translating `{}` to `{}`",
                     dependency.name, selected.name,
                 ))?;
             }
             selected
         } else {
-            let mut source = crate::sources::GitSource::new(src.source_id()?, config)?;
+            let mut source = crate::sources::GitSource::new(src.source_id()?, gctx)?;
             let packages = source.read_packages()?;
             let package = infer_package_for_git_source(packages, &src)?;
             Dependency::from(package.summary())
@@ -307,7 +347,19 @@ fn resolve_dependency(
         selected
     } else if let Some(raw_path) = &arg.path {
         let path = paths::normalize_path(&std::env::current_dir()?.join(raw_path));
-        let src = PathSource::new(&path);
+        let mut src = PathSource::new(path);
+        src.base = arg.base.clone();
+
+        if let Some(base) = &arg.base {
+            // Validate that the base is valid.
+            let workspace_root = || Ok(ws.root_manifest().parent().unwrap());
+            lookup_path_base(
+                &PathBaseName::new(base.clone())?,
+                &gctx,
+                &workspace_root,
+                spec.manifest().unstable_features(),
+            )?;
+        }
 
         let selected = if let Some(crate_spec) = &crate_spec {
             if let Some(v) = crate_spec.version_req() {
@@ -315,21 +367,22 @@ fn resolve_dependency(
                 anyhow::bail!("cannot specify a path (`{raw_path}`) with a version (`{v}`).");
             }
             let dependency = crate_spec.to_dependency()?.set_source(src);
-            let selected = select_package(&dependency, config, registry)?;
+            let selected = select_package(&dependency, gctx, registry)?;
             if dependency.name != selected.name {
-                config.shell().warn(format!(
+                gctx.shell().warn(format!(
                     "translating `{}` to `{}`",
                     dependency.name, selected.name,
                 ))?;
             }
             selected
         } else {
-            let source = crate::sources::PathSource::new(&path, src.source_id()?, config);
-            let package = source
-                .read_packages()?
-                .pop()
-                .expect("read_packages errors when no packages");
-            Dependency::from(package.summary())
+            let mut source = crate::sources::PathSource::new(&src.path, src.source_id()?, gctx);
+            let package = source.root_package()?;
+            let mut selected = Dependency::from(package.summary());
+            if let Some(Source::Path(selected_src)) = &mut selected.source {
+                selected_src.base = src.base;
+            }
+            selected
         };
         selected
     } else if let Some(crate_spec) = &crate_spec {
@@ -339,7 +392,16 @@ fn resolve_dependency(
     };
     selected_dep = populate_dependency(selected_dep, arg);
 
-    let old_dep = get_existing_dependency(manifest, selected_dep.toml_key(), section)?;
+    let lookup = |dep_key: &_| {
+        get_existing_dependency(
+            ws,
+            spec.manifest().unstable_features(),
+            manifest,
+            dep_key,
+            section,
+        )
+    };
+    let old_dep = fuzzy_lookup(&mut selected_dep, lookup, gctx)?;
     let mut dependency = if let Some(mut old_dep) = old_dep.clone() {
         if old_dep.name != selected_dep.name {
             // Assuming most existing keys are not relevant when the package changes
@@ -361,7 +423,10 @@ fn resolve_dependency(
     if dependency.source().is_none() {
         // Checking for a workspace dependency happens first since a member could be specified
         // in the workspace dependencies table as a dependency
-        if let Some(_dep) = find_workspace_dep(dependency.toml_key(), ws.root_manifest()).ok() {
+        let lookup = |toml_key: &_| {
+            Ok(find_workspace_dep(toml_key, ws, ws.root_manifest(), ws.unstable_features()).ok())
+        };
+        if let Some(_dep) = fuzzy_lookup(&mut dependency, lookup, gctx)? {
             dependency = dependency.set_source(WorkspaceSource::new());
         } else if let Some(package) = ws.members().find(|p| p.name().as_str() == dependency.name) {
             // Only special-case workspaces when the user doesn't provide any extra
@@ -375,17 +440,11 @@ fn resolve_dependency(
             }
             dependency = dependency.set_source(src);
         } else {
-            let latest = get_latest_dependency(
-                spec,
-                &dependency,
-                false,
-                honor_rust_version,
-                config,
-                registry,
-            )?;
+            let latest =
+                get_latest_dependency(spec, &dependency, honor_rust_version, gctx, registry)?;
 
             if dependency.name != latest.name {
-                config.shell().warn(format!(
+                gctx.shell().warn(format!(
                     "translating `{}` to `{}`",
                     dependency.name, latest.name,
                 ))?;
@@ -410,14 +469,19 @@ fn resolve_dependency(
         dependency = dependency.clear_version();
     }
 
-    let query = dependency.query(config)?;
+    let query = dependency.query(gctx)?;
     let query = match query {
         MaybeWorkspace::Workspace(_workspace) => {
-            let dep = find_workspace_dep(dependency.toml_key(), ws.root_manifest())?;
+            let dep = find_workspace_dep(
+                dependency.toml_key(),
+                ws,
+                ws.root_manifest(),
+                ws.unstable_features(),
+            )?;
             if let Some(features) = dep.features.clone() {
                 dependency = dependency.set_inherited_features(features);
             }
-            let query = dep.query(config)?;
+            let query = dep.query(gctx)?;
             match query {
                 MaybeWorkspace::Workspace(_) => {
                     unreachable!("This should have been caught when parsing a workspace root")
@@ -431,6 +495,42 @@ fn resolve_dependency(
     let dependency = populate_available_features(dependency, &query, registry)?;
 
     Ok(dependency)
+}
+
+fn fuzzy_lookup(
+    dependency: &mut Dependency,
+    lookup: impl Fn(&str) -> CargoResult<Option<Dependency>>,
+    gctx: &GlobalContext,
+) -> CargoResult<Option<Dependency>> {
+    if let Some(rename) = dependency.rename() {
+        // Manually implement `toml_key` to restrict fuzzy lookups to only package names to mirror `PackageRegistry::query()`
+        return lookup(rename);
+    }
+
+    for name_permutation in [
+        dependency.name.clone(),
+        dependency.name.replace('-', "_"),
+        dependency.name.replace('_', "-"),
+    ] {
+        let Some(dep) = lookup(&name_permutation)? else {
+            continue;
+        };
+
+        if dependency.name != name_permutation {
+            // Mirror the fuzzy matching policy of `PackageRegistry::query()`
+            if !matches!(dep.source, Some(Source::Registry(_))) {
+                continue;
+            }
+            gctx.shell().warn(format!(
+                "translating `{}` to `{}`",
+                dependency.name, &name_permutation,
+            ))?;
+            dependency.name = name_permutation;
+        }
+        return Ok(Some(dep));
+    }
+
+    Ok(None)
 }
 
 /// When { workspace = true } you cannot define other keys that configure
@@ -467,11 +567,33 @@ fn check_invalid_ws_keys(toml_key: &str, arg: &DepOp) -> CargoResult<()> {
     Ok(())
 }
 
+/// When the `--optional` option is added using `cargo add`, we need to
+/// check the current rust-version. As the `dep:` syntax is only available
+/// starting with Rust 1.60.0
+///
+/// `true` means that the rust-version is None or the rust-version is higher
+/// than the version needed.
+///
+/// Note: Previous versions can only use the implicit feature name.
+fn check_rust_version_for_optional_dependency(
+    rust_version: Option<&RustVersion>,
+) -> CargoResult<bool> {
+    match rust_version {
+        Some(version) => {
+            let syntax_support_version = RustVersion::from_str("1.60.0")?;
+            Ok(&syntax_support_version <= version)
+        }
+        None => Ok(true),
+    }
+}
+
 /// Provide the existing dependency for the target table
 ///
 /// If it doesn't exist but exists in another table, let's use that as most likely users
 /// want to use the same version across all tables unless they are renaming.
 fn get_existing_dependency(
+    ws: &Workspace<'_>,
+    unstable_features: &Features,
     manifest: &LocalManifest,
     dep_key: &str,
     section: &DepTable,
@@ -486,7 +608,7 @@ fn get_existing_dependency(
     }
 
     let mut possible: Vec<_> = manifest
-        .get_dependency_versions(dep_key)
+        .get_dependency_versions(dep_key, ws, unstable_features)
         .map(|(path, dep)| {
             let key = if path == *section {
                 (Key::Existing, true)
@@ -504,9 +626,7 @@ fn get_existing_dependency(
         })
         .collect();
     possible.sort_by_key(|(key, _)| *key);
-    let (key, dep) = if let Some(item) = possible.pop() {
-        item
-    } else {
+    let Some((key, dep)) = possible.pop() else {
         return Ok(None);
     };
     let mut dep = dep?;
@@ -534,25 +654,29 @@ fn get_existing_dependency(
 fn get_latest_dependency(
     spec: &Package,
     dependency: &Dependency,
-    _flag_allow_prerelease: bool,
-    honor_rust_version: bool,
-    config: &Config,
+    honor_rust_version: Option<bool>,
+    gctx: &GlobalContext,
     registry: &mut PackageRegistry<'_>,
 ) -> CargoResult<Dependency> {
-    let query = dependency.query(config)?;
+    let query = dependency.query(gctx)?;
     match query {
         MaybeWorkspace::Workspace(_) => {
             unreachable!("registry dependencies required, found a workspace dependency");
         }
         MaybeWorkspace::Other(query) => {
-            let mut possibilities = loop {
-                match registry.query_vec(&query, QueryKind::Fuzzy) {
+            let possibilities = loop {
+                match registry.query_vec(&query, QueryKind::Normalized) {
                     std::task::Poll::Ready(res) => {
                         break res?;
                     }
                     std::task::Poll::Pending => registry.block_until_ready()?,
                 }
             };
+
+            let mut possibilities: Vec<_> = possibilities
+                .into_iter()
+                .map(|s| s.into_summary())
+                .collect();
 
             possibilities.sort_by_key(|s| {
                 // Fallback to a pre-release if no official release is available by sorting them as
@@ -567,53 +691,67 @@ fn get_latest_dependency(
                 )
             })?;
 
-            if config.cli_unstable().msrv_policy && honor_rust_version {
-                fn parse_msrv(comp: PartialVersion) -> (u64, u64, u64) {
-                    (comp.major, comp.minor.unwrap_or(0), comp.patch.unwrap_or(0))
-                }
+            if honor_rust_version.unwrap_or(true) {
+                let (req_msrv, is_msrv) = spec
+                    .rust_version()
+                    .cloned()
+                    .map(|msrv| CargoResult::Ok((msrv.clone().into_partial(), true)))
+                    .unwrap_or_else(|| {
+                        let rustc = gctx.load_global_rustc(None)?;
 
-                if let Some(req_msrv) = spec.rust_version().map(parse_msrv) {
-                    let msrvs = possibilities
-                        .iter()
-                        .map(|s| (s, s.rust_version().map(parse_msrv)))
-                        .collect::<Vec<_>>();
+                        // Remove any pre-release identifiers for easier comparison
+                        let rustc_version = rustc.version.clone().into();
+                        Ok((rustc_version, false))
+                    })?;
 
-                    // Find the latest version of the dep which has a compatible rust-version. To
-                    // determine whether or not one rust-version is compatible with another, we
-                    // compare the lowest possible versions they could represent, and treat
-                    // candidates without a rust-version as compatible by default.
-                    let (latest_msrv, _) = msrvs
-                        .iter()
-                        .filter(|(_, v)| v.map(|msrv| req_msrv >= msrv).unwrap_or(true))
-                        .last()
-                        .ok_or_else(|| {
-                            // Failing that, try to find the highest version with the lowest
-                            // rust-version to report to the user.
-                            let lowest_candidate = msrvs
-                                .iter()
-                                .min_set_by_key(|(_, v)| v)
-                                .iter()
-                                .map(|(s, _)| s)
-                                .max_by_key(|s| s.version());
-                            rust_version_incompat_error(
-                                &dependency.name,
-                                spec.rust_version().unwrap(),
-                                lowest_candidate.copied(),
+                let msrvs = possibilities
+                    .iter()
+                    .map(|s| (s, s.rust_version()))
+                    .collect::<Vec<_>>();
+
+                // Find the latest version of the dep which has a compatible rust-version. To
+                // determine whether or not one rust-version is compatible with another, we
+                // compare the lowest possible versions they could represent, and treat
+                // candidates without a rust-version as compatible by default.
+                let latest_msrv = latest_compatible(&msrvs, &req_msrv).ok_or_else(|| {
+                        let name = spec.name();
+                        let dep_name = &dependency.name;
+                        let latest_version = latest.version();
+                        let latest_msrv = latest
+                            .rust_version()
+                            .expect("as `None` are compatible, we can't be here");
+                        if is_msrv {
+                            anyhow::format_err!(
+                                "\
+no version of crate `{dep_name}` can maintain {name}'s rust-version of {req_msrv}
+help: pass `--ignore-rust-version` to select {dep_name}@{latest_version} which requires rustc {latest_msrv}"
                             )
-                        })?;
+                        } else {
+                            anyhow::format_err!(
+                                "\
+no version of crate `{dep_name}` is compatible with rustc {req_msrv}
+help: pass `--ignore-rust-version` to select {dep_name}@{latest_version} which requires rustc {latest_msrv}"
+                            )
+                        }
+                    })?;
 
-                    if latest_msrv.version() < latest.version() {
-                        config.shell().warn(format_args!(
-                            "ignoring `{dependency}@{latest_version}` (which has a rust-version of \
-                             {latest_rust_version}) to satisfy this package's rust-version of \
-                             {rust_version} (use `--ignore-rust-version` to override)",
-                            latest_version = latest.version(),
-                            latest_rust_version = latest.rust_version().unwrap(),
-                            rust_version = spec.rust_version().unwrap(),
+                if latest_msrv.version() < latest.version() {
+                    let latest_version = latest.version();
+                    let latest_rust_version = latest.rust_version().unwrap();
+                    let name = spec.name();
+                    if is_msrv {
+                        gctx.shell().warn(format_args!(
+                            "\
+ignoring {dependency}@{latest_version} (which requires rustc {latest_rust_version}) to maintain {name}'s rust-version of {req_msrv}",
                         ))?;
-
-                        latest = latest_msrv;
+                    } else {
+                        gctx.shell().warn(format_args!(
+                            "\
+ignoring {dependency}@{latest_version} (which requires rustc {latest_rust_version}) as it is incompatible with rustc {req_msrv}",
+                        ))?;
                     }
+
+                    latest = latest_msrv;
                 }
             }
 
@@ -626,37 +764,33 @@ fn get_latest_dependency(
     }
 }
 
-fn rust_version_incompat_error(
-    dep: &str,
-    rust_version: PartialVersion,
-    lowest_rust_version: Option<&Summary>,
-) -> anyhow::Error {
-    let mut error_msg = format!(
-        "could not find version of crate `{dep}` that satisfies this package's rust-version of \
-         {rust_version}\n\
-         help: use `--ignore-rust-version` to override this behavior"
-    );
-
-    if let Some(lowest) = lowest_rust_version {
-        // rust-version must be present for this candidate since it would have been selected as
-        // compatible previously if it weren't.
-        let version = lowest.version();
-        let rust_version = lowest.rust_version().unwrap();
-        error_msg.push_str(&format!(
-            "\nnote: the lowest rust-version available for `{dep}` is {rust_version}, used in \
-             version {version}"
-        ));
-    }
-
-    anyhow::format_err!(error_msg)
+/// Of MSRV-compatible summaries, find the highest version
+///
+/// Assumptions:
+/// - `msrvs` is sorted by version
+fn latest_compatible<'s>(
+    msrvs: &[(&'s Summary, Option<&RustVersion>)],
+    pkg_msrv: &PartialVersion,
+) -> Option<&'s Summary> {
+    msrvs
+        .iter()
+        .filter(|(_, dep_msrv)| {
+            dep_msrv
+                .as_ref()
+                .map(|dep_msrv| dep_msrv.is_compatible_with(pkg_msrv))
+                .unwrap_or(true)
+        })
+        .map(|(s, _)| s)
+        .last()
+        .copied()
 }
 
 fn select_package(
     dependency: &Dependency,
-    config: &Config,
+    gctx: &GlobalContext,
     registry: &mut PackageRegistry<'_>,
 ) -> CargoResult<Dependency> {
-    let query = dependency.query(config)?;
+    let query = dependency.query(gctx)?;
     match query {
         MaybeWorkspace::Workspace(_) => {
             unreachable!("path or git dependency expected, found workspace dependency");
@@ -664,13 +798,19 @@ fn select_package(
         MaybeWorkspace::Other(query) => {
             let possibilities = loop {
                 // Exact to avoid returning all for path/git
-                match registry.query_vec(&query, QueryKind::Exact) {
+                match registry.query_vec(&query, QueryKind::Normalized) {
                     std::task::Poll::Ready(res) => {
                         break res?;
                     }
                     std::task::Poll::Pending => registry.block_until_ready()?,
                 }
             };
+
+            let possibilities: Vec<_> = possibilities
+                .into_iter()
+                .map(|s| s.into_summary())
+                .collect();
+
             match possibilities.len() {
                 0 => {
                     let source = dependency
@@ -682,6 +822,11 @@ fn select_package(
                     let mut dep = Dependency::from(&possibilities[0]);
                     if let Some(reg_name) = dependency.registry.as_deref() {
                         dep = dep.set_registry(reg_name);
+                    }
+                    if let Some(Source::Path(PathSource { base, .. })) = dependency.source() {
+                        if let Some(Source::Path(dep_src)) = &mut dep.source {
+                            dep_src.base = base.clone();
+                        }
                     }
                     Ok(dep)
                 }
@@ -745,6 +890,13 @@ fn populate_dependency(mut dependency: Dependency, arg: &DepOp) -> Dependency {
             dependency.optional = Some(true);
         } else {
             dependency.optional = None;
+        }
+    }
+    if let Some(value) = arg.public {
+        if value {
+            dependency.public = Some(true);
+        } else {
+            dependency.public = None;
         }
     }
     if let Some(value) = arg.default_features {
@@ -829,7 +981,7 @@ impl DependencyUI {
                     .map(|s| s.as_str()),
             );
         }
-        activated.remove("default");
+        activated.swap_remove("default");
         activated.sort();
         let mut deactivated = self
             .available_features
@@ -878,7 +1030,7 @@ fn populate_available_features(
     }
 
     let possibilities = loop {
-        match registry.query_vec(&query, QueryKind::Fuzzy) {
+        match registry.query_vec(&query, QueryKind::Normalized) {
             std::task::Poll::Ready(res) => {
                 break res?;
             }
@@ -889,6 +1041,7 @@ fn populate_available_features(
     // in the lock file for a given version requirement.
     let lowest_common_denominator = possibilities
         .iter()
+        .map(|s| s.as_summary())
         .min_by_key(|s| {
             // Fallback to a pre-release if no official release is available by sorting them as
             // more.
@@ -933,13 +1086,15 @@ fn print_action_msg(shell: &mut Shell, dep: &DependencyUI, section: &[String]) -
     if dep.optional().unwrap_or(false) {
         write!(message, " optional")?;
     }
+    if dep.public().unwrap_or(false) {
+        write!(message, " public")?;
+    }
     let section = if section.len() == 1 {
         section[0].clone()
     } else {
         format!("{} for target `{}`", &section[2], &section[1])
     };
     write!(message, " {section}")?;
-    write!(message, ".")?;
     shell.status("Adding", message)
 }
 
@@ -947,64 +1102,69 @@ fn print_dep_table_msg(shell: &mut Shell, dep: &DependencyUI) -> CargoResult<()>
     if matches!(shell.verbosity(), crate::core::shell::Verbosity::Quiet) {
         return Ok(());
     }
+
+    let stderr = shell.err();
+    let good = style::GOOD;
+    let error = style::ERROR;
+
     let (activated, deactivated) = dep.features();
     if !activated.is_empty() || !deactivated.is_empty() {
         let prefix = format!("{:>13}", " ");
-        let suffix = if let Some(version) = &dep.available_version {
-            let mut version = version.clone();
-            version.build = Default::default();
-            let version = version.to_string();
-            // Avoid displaying the version if it will visually look like the version req that we
-            // showed earlier
-            let version_req = dep
-                .version()
-                .and_then(|v| semver::VersionReq::parse(v).ok())
-                .and_then(|v| precise_version(&v));
-            if version_req.as_deref() != Some(version.as_str()) {
-                format!(" as of v{version}")
-            } else {
-                "".to_owned()
+        let suffix = format_features_version_suffix(&dep);
+
+        writeln!(stderr, "{prefix}Features{suffix}:")?;
+
+        const MAX_FEATURE_PRINTS: usize = 30;
+        let total_activated = activated.len();
+        let total_deactivated = deactivated.len();
+
+        if total_activated <= MAX_FEATURE_PRINTS {
+            for feat in activated {
+                writeln!(stderr, "{prefix}{good}+{good:#} {feat}")?;
             }
         } else {
-            "".to_owned()
-        };
-        shell.write_stderr(
-            format_args!("{}Features{}:\n", prefix, suffix),
-            &ColorSpec::new(),
-        )?;
-        for feat in activated {
-            shell.write_stderr(&prefix, &ColorSpec::new())?;
-            shell.write_stderr('+', &ColorSpec::new().set_bold(true).set_fg(Some(Green)))?;
-            shell.write_stderr(format_args!(" {}\n", feat), &ColorSpec::new())?;
+            writeln!(stderr, "{prefix}{total_activated} activated features")?;
         }
-        for feat in deactivated {
-            shell.write_stderr(&prefix, &ColorSpec::new())?;
-            shell.write_stderr('-', &ColorSpec::new().set_bold(true).set_fg(Some(Red)))?;
-            shell.write_stderr(format_args!(" {}\n", feat), &ColorSpec::new())?;
+
+        if total_activated + total_deactivated <= MAX_FEATURE_PRINTS {
+            for feat in deactivated {
+                writeln!(stderr, "{prefix}{error}-{error:#} {feat}")?;
+            }
+        } else {
+            writeln!(stderr, "{prefix}{total_deactivated} deactivated features")?;
         }
     }
 
     Ok(())
 }
 
-// Based on Iterator::is_sorted from nightly std; remove in favor of that when stabilized.
-fn is_sorted(mut it: impl Iterator<Item = impl PartialOrd>) -> bool {
-    let mut last = match it.next() {
-        Some(e) => e,
-        None => return true,
-    };
-
-    for curr in it {
-        if curr < last {
-            return false;
+fn format_features_version_suffix(dep: &DependencyUI) -> String {
+    if let Some(version) = &dep.available_version {
+        let mut version = version.clone();
+        version.build = Default::default();
+        let version = version.to_string();
+        // Avoid displaying the version if it will visually look like the version req that we
+        // showed earlier
+        let version_req = dep
+            .version()
+            .and_then(|v| semver::VersionReq::parse(v).ok())
+            .and_then(|v| precise_version(&v));
+        if version_req.as_deref() != Some(version.as_str()) {
+            format!(" as of v{version}")
+        } else {
+            "".to_owned()
         }
-        last = curr;
+    } else {
+        "".to_owned()
     }
-
-    true
 }
 
-fn find_workspace_dep(toml_key: &str, root_manifest: &Path) -> CargoResult<Dependency> {
+fn find_workspace_dep(
+    toml_key: &str,
+    ws: &Workspace<'_>,
+    root_manifest: &Path,
+    unstable_features: &Features,
+) -> CargoResult<Dependency> {
     let manifest = LocalManifest::try_new(root_manifest)?;
     let manifest = manifest
         .data
@@ -1021,11 +1181,17 @@ fn find_workspace_dep(toml_key: &str, root_manifest: &Path) -> CargoResult<Depen
         .context("could not find `dependencies` table in `workspace`")?
         .as_table_like()
         .context("could not make `dependencies` into a table")?;
-    let dep_item = dependencies.get(toml_key).context(format!(
-        "could not find {} in `workspace.dependencies`",
-        toml_key
-    ))?;
-    Dependency::from_toml(root_manifest.parent().unwrap(), toml_key, dep_item)
+    let dep_item = dependencies
+        .get(toml_key)
+        .with_context(|| format!("could not find {toml_key} in `workspace.dependencies`"))?;
+    Dependency::from_toml(
+        ws.gctx(),
+        ws.root(),
+        root_manifest.parent().unwrap(),
+        unstable_features,
+        toml_key,
+        dep_item,
+    )
 }
 
 /// Convert a `semver::VersionReq` into a rendered `semver::Version` if all fields are fully

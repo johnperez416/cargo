@@ -1,9 +1,60 @@
-extern crate proc_macro;
+//! # Cargo test macro.
+//!
+//! This is meant to be consumed alongside `cargo-test-support`. See
+//! <https://rust-lang.github.io/cargo/contrib/> for a guide on writing tests.
+//!
+//! > This crate is maintained by the Cargo team, primarily for use by Cargo
+//! > and not intended for external use. This
+//! > crate may make major changes to its APIs or be deprecated without warning.
 
 use proc_macro::*;
+use std::path::Path;
 use std::process::Command;
 use std::sync::Once;
 
+/// Replacement for `#[test]`
+///
+/// The `#[cargo_test]` attribute extends `#[test]` with some setup before starting the test.
+/// It will create a filesystem "sandbox" under the "cargo integration test" directory for each test, such as `/path/to/cargo/target/tmp/cit/t123/`.
+/// The sandbox will contain a `home` directory that will be used instead of your normal home directory.
+///
+/// The `#[cargo_test]` attribute takes several options that will affect how the test is generated.
+/// They are listed in parentheses separated with commas, such as:
+///
+/// ```rust,ignore
+/// #[cargo_test(nightly, reason = "-Zfoo is unstable")]
+/// ```
+///
+/// The options it supports are:
+///
+/// * `>=1.64` --- This indicates that the test will only run with the given version of `rustc` or newer.
+///   This can be used when a new `rustc` feature has been stabilized that the test depends on.
+///   If this is specified, a `reason` is required to explain why it is being checked.
+/// * `nightly` --- This will cause the test to be ignored if not running on the nightly toolchain.
+///   This is useful for tests that use unstable options in `rustc` or `rustdoc`.
+///   These tests are run in Cargo's CI, but are disabled in rust-lang/rust's CI due to the difficulty of updating both repos simultaneously.
+///   A `reason` field is required to explain why it is nightly-only.
+/// * `requires = "<cmd>"` --- This indicates a command that is required to be installed to be run.
+///   For example, `requires = "rustfmt"` means the test will only run if the executable `rustfmt` is installed.
+///   These tests are *always* run on CI.
+///   This is mainly used to avoid requiring contributors from having every dependency installed.
+/// * `build_std_real` --- This is a "real" `-Zbuild-std` test (in the `build_std` integration test).
+///   This only runs on nightly, and only if the environment variable `CARGO_RUN_BUILD_STD_TESTS` is set (these tests on run on Linux).
+/// * `build_std_mock` --- This is a "mock" `-Zbuild-std` test (which uses a mock standard library).
+///   This only runs on nightly, and is disabled for windows-gnu.
+/// * `public_network_test` --- This tests contacts the public internet.
+///   These tests are disabled unless the `CARGO_PUBLIC_NETWORK_TESTS` environment variable is set.
+///   Use of this should be *extremely rare*, please avoid using it if possible.
+///   The hosts it contacts should have a relatively high confidence that they are reliable and stable (such as github.com), especially in CI.
+///   The tests should be carefully considered for developer security and privacy as well.
+/// * `container_test` --- This indicates that it is a test that uses Docker.
+///   These tests are disabled unless the `CARGO_CONTAINER_TESTS` environment variable is set.
+///   This requires that you have Docker installed.
+///   The SSH tests also assume that you have OpenSSH installed.
+///   These should work on Linux, macOS, and Windows where possible.
+///   Unfortunately these tests are not run in CI for macOS or Windows (no Docker on macOS, and Windows does not support Linux images).
+///   See [`cargo-test-support::containers`](https://doc.rust-lang.org/nightly/nightly-rustc/cargo_test_support/containers) for more on writing these tests.
+/// * `ignore_windows="reason"` --- Indicates that the test should be ignored on windows for the given reason.
 #[proc_macro_attribute]
 pub fn cargo_test(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Ideally these options would be embedded in the test itself. However, I
@@ -76,8 +127,24 @@ pub fn cargo_test(attr: TokenStream, item: TokenStream) -> TokenStream {
                 requires_reason = true;
                 set_ignore!(is_not_nightly, "requires nightly");
             }
-            s if s.starts_with("requires_") => {
+            "requires_rustup_stable" => {
+                set_ignore!(
+                    !has_rustup_stable(),
+                    "rustup or stable toolchain not installed"
+                );
+            }
+            s if s.starts_with("requires=") => {
                 let command = &s[9..];
+                let Ok(literal) = command.parse::<Literal>() else {
+                    panic!("expect a string literal, found: {command}");
+                };
+                let literal = literal.to_string();
+                let Some(command) = literal
+                    .strip_prefix('"')
+                    .and_then(|lit| lit.strip_suffix('"'))
+                else {
+                    panic!("expect a quoted string literal, found: {literal}");
+                };
                 set_ignore!(!has_command(command), "{command} not installed");
             }
             s if s.starts_with(">=1.") => {
@@ -189,7 +256,7 @@ fn to_token_stream(code: &str) -> TokenStream {
 
 static mut VERSION: (u32, bool) = (0, false);
 
-fn version() -> &'static (u32, bool) {
+fn version() -> (u32, bool) {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
         let output = Command::new("rustc")
@@ -203,37 +270,58 @@ fn version() -> &'static (u32, bool) {
         let minor = vers.split('.').skip(1).next().unwrap().parse().unwrap();
         unsafe { VERSION = (minor, is_nightly) }
     });
-    unsafe { &VERSION }
+    unsafe { VERSION }
 }
 
-fn has_command(command: &str) -> bool {
-    let output = match Command::new(command).arg("--version").output() {
+fn check_command(command_path: &Path, args: &[&str]) -> bool {
+    let mut command = Command::new(command_path);
+    let command_name = command.get_program().to_str().unwrap().to_owned();
+    command.args(args);
+    let output = match command.output() {
         Ok(output) => output,
         Err(e) => {
-            // hg is not installed on GitHub macOS or certain constrained
-            // environments like Docker. Consider installing it if Cargo gains
-            // more hg support, but otherwise it isn't critical.
-            if is_ci() && command != "hg" {
-                panic!(
-                    "expected command `{}` to be somewhere in PATH: {}",
-                    command, e
-                );
+            // * hg is not installed on GitHub macOS or certain constrained
+            //   environments like Docker. Consider installing it if Cargo
+            //   gains more hg support, but otherwise it isn't critical.
+            // * lldb is not pre-installed on Ubuntu and Windows, so skip.
+            if is_ci() && !matches!(command_name.as_str(), "hg" | "lldb") {
+                panic!("expected command `{command_name}` to be somewhere in PATH: {e}",);
             }
             return false;
         }
     };
     if !output.status.success() {
         panic!(
-            "expected command `{}` to be runnable, got error {}:\n\
+            "expected command `{command_name}` to be runnable, got error {}:\n\
             stderr:{}\n\
             stdout:{}\n",
-            command,
             output.status,
             String::from_utf8_lossy(&output.stderr),
             String::from_utf8_lossy(&output.stdout)
         );
     }
     true
+}
+
+fn has_command(command: &str) -> bool {
+    check_command(Path::new(command), &["--version"])
+}
+
+fn has_rustup_stable() -> bool {
+    if option_env!("CARGO_TEST_DISABLE_NIGHTLY").is_some() {
+        // This cannot run on rust-lang/rust CI due to the lack of rustup.
+        return false;
+    }
+    // Cargo mucks with PATH on Windows, adding sysroot host libdir, which is
+    // "bin", which circumvents the rustup wrapper. Use the path directly from
+    // CARGO_HOME.
+    let home = match option_env!("CARGO_HOME") {
+        Some(home) => home,
+        None if is_ci() => panic!("expected to run under rustup"),
+        None => return false,
+    };
+    let cargo = Path::new(home).join("bin/cargo");
+    check_command(&cargo, &["+stable", "--version"])
 }
 
 /// Whether or not this running in a Continuous Integration environment.

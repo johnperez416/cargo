@@ -10,13 +10,14 @@
 //! cargo test --test testsuite -- old_cargos --nocapture --ignored
 //! ```
 
+use std::fs;
+
 use cargo::CargoResult;
-use cargo_test_support::paths::CargoPathExt;
+use cargo_test_support::prelude::*;
 use cargo_test_support::registry::{self, Dependency, Package};
-use cargo_test_support::{cargo_exe, execs, paths, process, project, rustc_host};
+use cargo_test_support::{cargo_exe, execs, paths, process, project, rustc_host, str};
 use cargo_util::{ProcessBuilder, ProcessError};
 use semver::Version;
-use std::fs;
 
 fn tc_process(cmd: &str, toolchain: &str) -> ProcessBuilder {
     let mut p = if toolchain == "this" {
@@ -305,6 +306,11 @@ fn new_features() {
     let mut unexpected_results: Vec<Vec<String>> = Vec::new();
 
     for (version, toolchain) in &toolchains {
+        if version >= &Version::new(1, 15, 0) && version < &Version::new(1, 18, 0) {
+            // These versions do not stay within the sandbox, and chokes on
+            // Cargo's own `Cargo.toml`.
+            continue;
+        }
         let mut tc_result = Vec::new();
         // Write a config appropriate for this version.
         if version < &Version::new(1, 12, 0) {
@@ -347,7 +353,7 @@ fn new_features() {
             let stdout = std::str::from_utf8(&output.stdout).unwrap();
             let version = stdout
                 .trim()
-                .rsplitn(2, ':')
+                .rsplitn(2, ['@', ':'])
                 .next()
                 .expect("version after colon");
             Some(Version::parse(version).expect("parseable version"))
@@ -443,7 +449,22 @@ fn new_features() {
                 }
             }
             Err(e) => {
-                tc_result.push(format!("unlocked build failed: {}", e));
+                if version < &Version::new(1, 49, 0) {
+                    // Old versions don't like the dep: syntax.
+                    check_err_contains(
+                        &mut tc_result,
+                        e,
+                        "which is neither a dependency nor another feature",
+                    );
+                } else if version >= &Version::new(1, 49, 0) && version < &Version::new(1, 51, 0) {
+                    check_err_contains(
+                        &mut tc_result,
+                        e,
+                        "requires the `-Z namespaced-features` flag",
+                    );
+                } else {
+                    tc_result.push(format!("unlocked build failed: {}", e));
+                }
             }
         }
 
@@ -469,14 +490,29 @@ fn new_features() {
                 check_lock!(tc_result, "new-baz-dep", which, behavior.new_baz_dep, None);
             }
             Err(e) => {
-                // When version >= 1.51 and <= 1.59,
-                // 1.0.1 can't be used without -Znamespaced-features
-                // It gets filtered out of the index.
-                check_err_contains(
-                    &mut tc_result,
-                    e,
-                    "candidate versions found which didn't match: 1.0.2, 1.0.0",
-                );
+                if version < &Version::new(1, 49, 0) {
+                    // Old versions don't like the dep: syntax.
+                    check_err_contains(
+                        &mut tc_result,
+                        e,
+                        "which is neither a dependency nor another feature",
+                    );
+                } else if version >= &Version::new(1, 49, 0) && version < &Version::new(1, 51, 0) {
+                    check_err_contains(
+                        &mut tc_result,
+                        e,
+                        "requires the `-Z namespaced-features` flag",
+                    );
+                } else {
+                    // When version >= 1.51 and <= 1.59,
+                    // 1.0.1 can't be used without -Znamespaced-features
+                    // It gets filtered out of the index.
+                    check_err_contains(
+                        &mut tc_result,
+                        e,
+                        "candidate versions found which didn't match: 1.0.2, 1.0.0",
+                    );
+                }
             }
         }
 
@@ -503,13 +539,28 @@ fn new_features() {
                 }
             }
             Err(e) => {
-                // When version >= 1.51 and <= 1.59,
-                // baz can't lock to 1.0.1, it requires -Znamespaced-features
-                check_err_contains(
-                    &mut tc_result,
-                    e,
-                    "candidate versions found which didn't match: 1.0.0",
-                );
+                if version < &Version::new(1, 49, 0) {
+                    // Old versions don't like the dep: syntax.
+                    check_err_contains(
+                        &mut tc_result,
+                        e,
+                        "which is neither a dependency nor another feature",
+                    );
+                } else if version >= &Version::new(1, 49, 0) && version < &Version::new(1, 51, 0) {
+                    check_err_contains(
+                        &mut tc_result,
+                        e,
+                        "requires the `-Z namespaced-features` flag",
+                    );
+                } else {
+                    // When version >= 1.51 and <= 1.59,
+                    // baz can't lock to 1.0.1, it requires -Znamespaced-features
+                    check_err_contains(
+                        &mut tc_result,
+                        e,
+                        "candidate versions found which didn't match: 1.0.0",
+                    );
+                }
             }
         }
 
@@ -545,6 +596,7 @@ fn index_cache_rebuild() {
     // happening, and switching between versions should work correctly
     // (although it will thrash the cash, that's better than not working
     // correctly.
+    let registry = registry::init();
     Package::new("baz", "1.0.0").publish();
     Package::new("bar", "1.0.0").publish();
     Package::new("bar", "1.0.1")
@@ -565,6 +617,19 @@ fn index_cache_rebuild() {
             "#,
         )
         .file("src/lib.rs", "")
+        .file(
+            ".cargo/config.toml",
+            &format!(
+                r#"
+                    [source.crates-io]
+                    replace-with = 'dummy-registry'
+
+                    [source.dummy-registry]
+                    registry = '{}'
+                "#,
+                registry.index_url()
+            ),
+        )
         .build();
 
     // This version of Cargo errors on index entries that have overlapping
@@ -573,32 +638,32 @@ fn index_cache_rebuild() {
         .with_process_builder(tc_process("cargo", "1.48.0"))
         .arg("check")
         .cwd(p.root())
-        .with_stderr(
-            "\
-[UPDATING] [..]
+        .with_stderr_data(str![[r#"
+[UPDATING] `[ROOT]/registry` index
 [DOWNLOADING] crates ...
-[DOWNLOADED] bar v1.0.0 [..]
+[DOWNLOADED] bar v1.0.0 (registry `[ROOT]/registry`)
 [CHECKING] bar v1.0.0
-[CHECKING] foo v0.1.0 [..]
-[FINISHED] [..]
-",
-        )
+[CHECKING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] dev [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 
     fs::remove_file(p.root().join("Cargo.lock")).unwrap();
 
     // This should rebuild the cache and use 1.0.1.
     p.cargo("check")
-        .with_stderr(
-            "\
-[UPDATING] [..]
+        .with_stderr_data(str![[r#"
+[WARNING] no edition set: defaulting to the 2015 edition while the latest is [..]
+[UPDATING] `dummy-registry` index
+[LOCKING] 2 packages to latest compatible versions
 [DOWNLOADING] crates ...
-[DOWNLOADED] bar v1.0.1 [..]
+[DOWNLOADED] bar v1.0.1 (registry `dummy-registry`)
 [CHECKING] bar v1.0.1
-[CHECKING] foo v0.1.0 [..]
-[FINISHED] [..]
-",
-        )
+[CHECKING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 
     fs::remove_file(p.root().join("Cargo.lock")).unwrap();
@@ -608,12 +673,11 @@ fn index_cache_rebuild() {
         .with_process_builder(tc_process("cargo", "1.48.0"))
         .arg("tree")
         .cwd(p.root())
-        .with_stdout(
-            "\
-foo v0.1.0 [..]
+        .with_stdout_data(str![[r#"
+foo v0.1.0 ([ROOT]/foo)
 └── bar v1.0.0
-",
-        )
+
+"#]])
         .run();
 }
 
@@ -647,22 +711,21 @@ fn avoids_split_debuginfo_collision() {
         .arg("build")
         .env("CARGO_INCREMENTAL", "1")
         .cwd(p.root())
-        .with_stderr(
-            "\
-[COMPILING] foo v0.1.0 [..]
-[FINISHED] [..]
-",
-        )
+        .with_stderr_data(str![[r#"
+[COMPILING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 
     p.cargo("build")
         .env("CARGO_INCREMENTAL", "1")
-        .with_stderr(
-            "\
-[COMPILING] foo v0.1.0 [..]
-[FINISHED] [..]
-",
-        )
+        .with_stderr_data(str![[r#"
+[WARNING] no edition set: defaulting to the 2015 edition while the latest is [..]
+[COMPILING] foo v0.1.0 ([ROOT]/foo)
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 
     execs()
@@ -670,10 +733,9 @@ fn avoids_split_debuginfo_collision() {
         .arg("build")
         .env("CARGO_INCREMENTAL", "1")
         .cwd(p.root())
-        .with_stderr(
-            "\
-[FINISHED] [..]
-",
-        )
+        .with_stderr_data(str![[r#"
+[FINISHED] `dev` profile [unoptimized + debuginfo] target(s) in [ELAPSED]s
+
+"#]])
         .run();
 }

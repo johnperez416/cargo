@@ -34,9 +34,11 @@
 //! [2]: https://github.com/rust-lang/rust/blob/9bb6e60d1f1360234aae90c97964c0fa5524f141/compiler/rustc_errors/src/json.rs#L312-L315
 
 use crate::core::compiler::BuildContext;
-use crate::core::{Dependency, PackageId, QueryKind, Workspace};
+use crate::core::{Dependency, PackageId, Workspace};
+use crate::sources::source::QueryKind;
 use crate::sources::SourceConfigMap;
-use crate::util::{iter_join, CargoResult, Config};
+use crate::util::cache_lock::CacheLockMode;
+use crate::util::CargoResult;
 use anyhow::{bail, format_err, Context};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -165,9 +167,9 @@ impl OnDiskReports {
         let on_disk = serde_json::to_vec(&self).unwrap();
         if let Err(e) = ws
             .target_dir()
-            .open_rw(
+            .open_rw_exclusive_create(
                 FUTURE_INCOMPAT_FILE,
-                ws.config(),
+                ws.gctx(),
                 "Future incompatibility report",
             )
             .and_then(|file| {
@@ -180,7 +182,7 @@ impl OnDiskReports {
             crate::display_warning_with_error(
                 "failed to write on-disk future incompatible report",
                 &e,
-                &mut ws.config().shell(),
+                &mut ws.gctx().shell(),
             );
         }
 
@@ -189,9 +191,9 @@ impl OnDiskReports {
 
     /// Loads the on-disk reports.
     pub fn load(ws: &Workspace<'_>) -> CargoResult<OnDiskReports> {
-        let report_file = match ws.target_dir().open_ro(
+        let report_file = match ws.target_dir().open_ro_shared(
             FUTURE_INCOMPAT_FILE,
-            ws.config(),
+            ws.gctx(),
             "Future incompatible report",
         ) {
             Ok(r) => r,
@@ -209,9 +211,9 @@ impl OnDiskReports {
         report_file
             .file()
             .read_to_string(&mut file_contents)
-            .with_context(|| "failed to read report")?;
+            .context("failed to read report")?;
         let on_disk_reports: OnDiskReports =
-            serde_json::from_str(&file_contents).with_context(|| "failed to load report")?;
+            serde_json::from_str(&file_contents).context("failed to load report")?;
         if on_disk_reports.version != ON_DISK_VERSION {
             bail!("unable to read reports; reports were saved from a future version of Cargo");
         }
@@ -223,14 +225,10 @@ impl OnDiskReports {
         self.reports.last().map(|r| r.id).unwrap()
     }
 
-    pub fn get_report(
-        &self,
-        id: u32,
-        config: &Config,
-        package: Option<&str>,
-    ) -> CargoResult<String> {
+    /// Returns an ANSI-styled report
+    pub fn get_report(&self, id: u32, package: Option<&str>) -> CargoResult<String> {
         let report = self.reports.iter().find(|r| r.id == id).ok_or_else(|| {
-            let available = iter_join(self.reports.iter().map(|r| r.id.to_string()), ", ");
+            let available = itertools::join(self.reports.iter().map(|r| r.id), ", ");
             format_err!(
                 "could not find report with ID {}\n\
                  Available IDs are: {}",
@@ -252,7 +250,7 @@ impl OnDiskReports {
                 Available packages are: {}\n
                 Omit the `--package` flag to display a report for all packages",
                         package,
-                        iter_join(report.per_package.keys(), ", ")
+                        itertools::join(report.per_package.keys(), ", ")
                     )
                 })?
                 .to_string()
@@ -266,15 +264,6 @@ impl OnDiskReports {
         };
         to_display += &package_report;
 
-        let shell = config.shell();
-
-        let to_display = if shell.err_supports_color() && shell.out_supports_color() {
-            to_display
-        } else {
-            strip_ansi_escapes::strip(&to_display)
-                .map(|v| String::from_utf8(v).expect("utf8"))
-                .expect("strip should never fail")
-        };
         Ok(to_display)
     }
 }
@@ -309,9 +298,12 @@ fn render_report(per_package_reports: &[FutureIncompatReportPackage]) -> BTreeMa
 /// This is best-effort - if an error occurs, `None` will be returned.
 fn get_updates(ws: &Workspace<'_>, package_ids: &BTreeSet<PackageId>) -> Option<String> {
     // This in general ignores all errors since this is opportunistic.
-    let _lock = ws.config().acquire_package_cache_lock().ok()?;
+    let _lock = ws
+        .gctx()
+        .acquire_package_cache_lock(CacheLockMode::DownloadExclusive)
+        .ok()?;
     // Create a set of updated registry sources.
-    let map = SourceConfigMap::new(ws.config()).ok()?;
+    let map = SourceConfigMap::new(ws.gctx()).ok()?;
     let mut package_ids: BTreeSet<_> = package_ids
         .iter()
         .filter(|pkg_id| pkg_id.source_id().is_registry())
@@ -332,13 +324,11 @@ fn get_updates(ws: &Workspace<'_>, package_ids: &BTreeSet<PackageId>) -> Option<
     let mut summaries = Vec::new();
     while !package_ids.is_empty() {
         package_ids.retain(|&pkg_id| {
-            let source = match sources.get_mut(&pkg_id.source_id()) {
-                Some(s) => s,
-                None => return false,
+            let Some(source) = sources.get_mut(&pkg_id.source_id()) else {
+                return false;
             };
-            let dep = match Dependency::parse(pkg_id.name(), None, pkg_id.source_id()) {
-                Ok(dep) => dep,
-                Err(_) => return false,
+            let Ok(dep) = Dependency::parse(pkg_id.name(), None, pkg_id.source_id()) else {
+                return false;
             };
             match source.query_vec(&dep, QueryKind::Exact) {
                 Poll::Ready(Ok(sum)) => {
@@ -358,19 +348,13 @@ fn get_updates(ws: &Workspace<'_>, package_ids: &BTreeSet<PackageId>) -> Option<
     for (pkg_id, summaries) in summaries {
         let mut updated_versions: Vec<_> = summaries
             .iter()
-            .map(|summary| summary.version())
+            .map(|summary| summary.as_summary().version())
             .filter(|version| *version > pkg_id.version())
             .collect();
         updated_versions.sort();
 
-        let updated_versions = iter_join(
-            updated_versions
-                .into_iter()
-                .map(|version| version.to_string()),
-            ", ",
-        );
-
         if !updated_versions.is_empty() {
+            let updated_versions = itertools::join(updated_versions, ", ");
             writeln!(
                 updates,
                 "{} has the following newer versions available: {}",
@@ -389,13 +373,13 @@ pub fn save_and_display_report(
     bcx: &BuildContext<'_, '_>,
     per_package_future_incompat_reports: &[FutureIncompatReportPackage],
 ) {
-    let should_display_message = match bcx.config.future_incompat_config() {
+    let should_display_message = match bcx.gctx.future_incompat_config() {
         Ok(config) => config.should_display_message(),
         Err(e) => {
             crate::display_warning_with_error(
                 "failed to read future-incompat config from disk",
                 &e,
-                &mut bcx.config.shell(),
+                &mut bcx.gctx.shell(),
             );
             true
         }
@@ -406,7 +390,7 @@ pub fn save_and_display_report(
         // `should_display_message` from the config file
         if bcx.build_config.future_incompat_report {
             drop(
-                bcx.config
+                bcx.gctx
                     .shell()
                     .note("0 dependencies had future-incompatible warnings"),
             );
@@ -434,7 +418,7 @@ pub fn save_and_display_report(
     let package_vers: Vec<_> = package_ids.iter().map(|pid| pid.to_string()).collect();
 
     if should_display_message || bcx.build_config.future_incompat_report {
-        drop(bcx.config.shell().warn(&format!(
+        drop(bcx.gctx.shell().warn(&format!(
             "the following packages contain code that will be rejected by a future \
              version of Rust: {}",
             package_vers.join(", ")
@@ -504,14 +488,14 @@ https://doc.rust-lang.org/cargo/reference/overriding-dependencies.html#the-patch
     );
 
     if bcx.build_config.future_incompat_report {
-        drop(bcx.config.shell().note(&suggestion_message));
-        drop(bcx.config.shell().note(&format!(
+        drop(bcx.gctx.shell().note(&suggestion_message));
+        drop(bcx.gctx.shell().note(&format!(
             "this report can be shown with `cargo report \
              future-incompatibilities --id {}`",
             saved_report_id
         )));
     } else if should_display_message {
-        drop(bcx.config.shell().note(&format!(
+        drop(bcx.gctx.shell().note(&format!(
             "to see what the problems were, use the option \
              `--future-incompat-report`, or run `cargo report \
              future-incompatibilities --id {}`",

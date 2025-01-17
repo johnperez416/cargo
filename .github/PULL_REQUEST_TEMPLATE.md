@@ -1,13 +1,7 @@
-<!-- homu-ignore:start -->
 <!--
-NOTICE: Due to limited review capacity, the Cargo team is not accepting new
-features or major changes at this time. Please consult with the team before
-opening a new PR. Only issues that have been explicitly marked as accepted
-will be reviewed.
-
 Thanks for submitting a pull request 🎉! Here are some tips for you:
 
-* If this is your first contribution, read "Cargo Contribution Guide":
+* If this is your first contribution, read "Cargo Contribution Guide" first:
   https://doc.crates.io/contrib/
 * Run `cargo fmt --all` to format your code changes.
 * Small commits and pull requests are always preferable and easy to review.
@@ -40,4 +34,3 @@ https://doc.crates.io/contrib/tests
 Other information you want to mention in this PR, such as prior arts,
 future extensions, an unresolved problem, or a TODO list.
 -->
-<!-- homu-ignore:end -->

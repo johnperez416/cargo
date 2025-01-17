@@ -4,13 +4,15 @@ use crate::command_prelude::*;
 pub fn cli() -> Command {
     subcommand("version")
         .about("Show version information")
-        .arg_quiet()
-        .after_help("Run `cargo help version` for more detailed information.\n")
+        .arg_silent_suggestion()
+        .after_help(color_print::cstr!(
+            "Run `<cyan,bold>cargo help version</>` for more detailed information.\n"
+        ))
 }
 
-pub fn exec(config: &mut Config, args: &ArgMatches) -> CliResult {
+pub fn exec(gctx: &mut GlobalContext, args: &ArgMatches) -> CliResult {
     let verbose = args.verbose() > 0;
     let version = cli::get_version_string(verbose);
-    cargo::drop_print!(config, "{}", version);
+    cargo::drop_print!(gctx, "{}", version);
     Ok(())
 }

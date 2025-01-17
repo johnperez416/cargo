@@ -87,6 +87,7 @@ _cargo() {
                         '--path=[local filesystem path to crate to add]: :_directories' \
                         '--rev=[specific commit to use when adding from git]:commit' \
                         '--tag=[tag to use when adding from git]:tag' \
+                        '--ignore-rust-version[Ignore rust-version specification in packages]' \
                         '1: :_guard "^-*" "crate name"' \
                         '*:args:_default'
                         ;;
@@ -162,6 +163,11 @@ _cargo() {
                 help)
                     _cargo_cmds
                         ;;
+                info)
+                    _arguments -s -A "^--" $common $registry \
+                        '--index=[specify registry index]:index' \
+                        '*: :_guard "^-*" "crate"'
+                        ;;
 
                 init)
                     _arguments -s -S $common $registry \
@@ -225,7 +231,8 @@ _cargo() {
                         ;;
 
                 package)
-                    _arguments -s -S $common $parallel $features $triple $target $manifest \
+                    _arguments -s -S $common $parallel $features $triple $target $manifest $registry \
+                        '--index=[specify registry index]:index' \
                         '(-l --list)'{-l,--list}'[print files included in a package without making one]' \
                         '--no-metadata[ignore warnings about a lack of human-usable metadata]' \
                         '--allow-dirty[allow dirty working directories to be packaged]' \
@@ -245,10 +252,6 @@ _cargo() {
                         "--no-verify[don't verify the contents by building them]" \
                         '--token=[specify token to use when uploading]:token' \
                         '--dry-run[perform all checks without uploading]'
-                        ;;
-
-                read-manifest)
-                    _arguments -s -S $common $manifest
                         ;;
 
                 remove | rm)
@@ -342,14 +345,11 @@ _cargo() {
                 update)
                     _arguments -s -S $common $manifest \
                         '--aggressive=[force dependency update]' \
+                        '--recursive=[force dependency update]' \
                         "--dry-run[don't actually write the lockfile]" \
                         '(-p --package)'{-p+,--package=}'[specify package to update]:package:_cargo_package_names' \
                         '--precise=[update single dependency to precise release]:release' \
                         '*:package:_cargo_package_names'
-                        ;;
-
-                verify-project)
-                    _arguments -s -S $common $manifest
                         ;;
 
                 version)
@@ -407,9 +407,15 @@ _cargo_cmds() {
 }
 
 _cargo_target_triple() {
-    local -a targets
-	targets=( ${(f)"$(rustc --print target-list)"} )
-	_describe 'target triple' targets
+    local -a result
+
+    if (( $+commands[rustup] )); then
+        result=( ${(f)"$(rustup target list --installed)"} )
+    else
+        result=( ${(f)"$(rustc --print target-list)"} )
+    fi
+
+    _describe 'target triple' result
 }
 
 #FIXME: Disabled until fixed

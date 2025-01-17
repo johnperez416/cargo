@@ -16,8 +16,16 @@ the vendor directory specified by `<path>` will contain all remote sources from
 dependencies specified. Additional manifests beyond the default one can be
 specified with the `-s` option.
 
-The `cargo vendor` command will also print out the configuration necessary
-to use the vendored sources, which you will need to add to `.cargo/config.toml`.
+The configuration necessary to use the vendored sources would be printed to
+stdout after `cargo vendor` completes the vendoring process.
+You will need to add or redirect it to your Cargo configuration file,
+which is usually `.cargo/config.toml` locally for the current package.
+
+Cargo treats vendored sources as read-only as it does to registry and git sources.
+If you intend to modify a crate from a remote source,
+use `[patch]` or a `path` dependency pointing to a local copy of that crate.
+Cargo will then correctly handle the crate on incremental rebuilds,
+as it knows that it is no longer a read-only dependency.
 
 ## OPTIONS
 
@@ -60,16 +68,16 @@ only a subset of the packages have changed.</dd>
 <code>Cargo.toml</code> file in the current directory or any parent directory.</dd>
 
 
-
-<dt class="option-term" id="option-cargo-vendor---frozen"><a class="option-anchor" href="#option-cargo-vendor---frozen"></a><code>--frozen</code></dt>
 <dt class="option-term" id="option-cargo-vendor---locked"><a class="option-anchor" href="#option-cargo-vendor---locked"></a><code>--locked</code></dt>
-<dd class="option-desc">Either of these flags requires that the <code>Cargo.lock</code> file is
-up-to-date. If the lock file is missing, or it needs to be updated, Cargo will
-exit with an error. The <code>--frozen</code> flag also prevents Cargo from
-attempting to access the network to determine if it is out-of-date.</p>
-<p>These may be used in environments where you want to assert that the
-<code>Cargo.lock</code> file is up-to-date (such as a CI build) or want to avoid network
-access.</dd>
+<dd class="option-desc">Asserts that the exact same dependencies and versions are used as when the
+existing <code>Cargo.lock</code> file was originally generated. Cargo will exit with an
+error when either of the following scenarios arises:</p>
+<ul>
+<li>The lock file is missing.</li>
+<li>Cargo attempted to change the lock file due to a different dependency resolution.</li>
+</ul>
+<p>It may be used in environments where deterministic builds are desired,
+such as in CI pipelines.</dd>
 
 
 <dt class="option-term" id="option-cargo-vendor---offline"><a class="option-anchor" href="#option-cargo-vendor---offline"></a><code>--offline</code></dt>
@@ -84,6 +92,21 @@ See the <a href="cargo-fetch.html">cargo-fetch(1)</a> command to download depend
 offline.</p>
 <p>May also be specified with the <code>net.offline</code> <a href="../reference/config.html">config value</a>.</dd>
 
+
+<dt class="option-term" id="option-cargo-vendor---frozen"><a class="option-anchor" href="#option-cargo-vendor---frozen"></a><code>--frozen</code></dt>
+<dd class="option-desc">Equivalent to specifying both <code>--locked</code> and <code>--offline</code>.</dd>
+
+
+<dt class="option-term" id="option-cargo-vendor---lockfile-path"><a class="option-anchor" href="#option-cargo-vendor---lockfile-path"></a><code>--lockfile-path</code> <em>PATH</em></dt>
+<dd class="option-desc">Changes the path of the lockfile from the default (<code>&lt;workspace_root&gt;/Cargo.lock</code>) to <em>PATH</em>. <em>PATH</em> must end with
+<code>Cargo.lock</code> (e.g. <code>--lockfile-path /tmp/temporary-lockfile/Cargo.lock</code>). Note that providing
+<code>--lockfile-path</code> will ignore existing lockfile at the default path, and instead will
+either use the lockfile from <em>PATH</em>, or write a new lockfile into the provided <em>PATH</em> if it doesn’t exist.
+This flag can be used to run most commands in read-only directories, writing lockfile into the provided <em>PATH</em>.</p>
+<p>This option is only available on the <a href="https://doc.rust-lang.org/book/appendix-07-nightly-rust.html">nightly
+channel</a> and
+requires the <code>-Z unstable-options</code> flag to enable (see
+<a href="https://github.com/rust-lang/cargo/issues/14421">#14421</a>).</dd>
 
 
 </dl>
@@ -117,7 +140,6 @@ terminal.</li>
 </ul>
 <p>May also be specified with the <code>term.color</code>
 <a href="../reference/config.html">config value</a>.</dd>
-
 
 
 </dl>
@@ -162,18 +184,15 @@ requires the <code>-Z unstable-options</code> flag to enable (see
 
 </dl>
 
-
 ## ENVIRONMENT
 
 See [the reference](../reference/environment-variables.html) for
 details on environment variables that Cargo reads.
 
-
 ## EXIT STATUS
 
 * `0`: Cargo succeeded.
 * `101`: Cargo failed to complete.
-
 
 ## EXAMPLES
 
@@ -188,6 +207,10 @@ details on environment variables that Cargo reads.
 3. Vendor the current workspace as well as another to "vendor"
 
        cargo vendor -s ../path/to/Cargo.toml
+
+4. Vendor and redirect the necessary vendor configs to a config file.
+
+       cargo vendor > path/to/my/cargo/config.toml
 
 ## SEE ALSO
 [cargo(1)](cargo.html)

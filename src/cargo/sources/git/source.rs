@@ -1,14 +1,22 @@
-//! See [GitSource].
+//! See [`GitSource`].
 
-use crate::core::source::{MaybePackage, QueryKind, Source, SourceId};
+use crate::core::global_cache_tracker;
 use crate::core::GitReference;
-use crate::core::{Dependency, Package, PackageId, Summary};
+use crate::core::SourceId;
+use crate::core::{Dependency, Package, PackageId};
+use crate::sources::git::utils::rev_to_oid;
 use crate::sources::git::utils::GitRemote;
-use crate::sources::PathSource;
+use crate::sources::source::MaybePackage;
+use crate::sources::source::QueryKind;
+use crate::sources::source::Source;
+use crate::sources::IndexSummary;
+use crate::sources::RecursivePathSource;
+use crate::util::cache_lock::CacheLockMode;
 use crate::util::errors::CargoResult;
 use crate::util::hex::short_hash;
-use crate::util::Config;
-use anyhow::Context;
+use crate::util::interning::InternedString;
+use crate::util::GlobalContext;
+use anyhow::Context as _;
 use cargo_util::paths::exclude_from_backups_and_indexing;
 use std::fmt::{self, Debug, Formatter};
 use std::task::Poll;
@@ -16,7 +24,7 @@ use tracing::trace;
 use url::Url;
 
 /// `GitSource` contains one or more packages gathering from a Git repository.
-/// Under the hood it uses [`PathSource`] to discover packages inside the
+/// Under the hood it uses [`RecursivePathSource`] to discover packages inside the
 /// repository.
 ///
 /// ## Filesystem layout
@@ -58,56 +66,63 @@ use url::Url;
 /// precisely fetch the same revision from the Git repository.
 ///
 /// ["Cargo Home"]: https://doc.rust-lang.org/nightly/cargo/guide/cargo-home.html#directories
-pub struct GitSource<'cfg> {
+pub struct GitSource<'gctx> {
     /// The git remote which we're going to fetch from.
     remote: GitRemote,
-    /// The Git reference from the manifest file.
-    manifest_reference: GitReference,
     /// The revision which a git source is locked to.
-    /// This is expected to be set after the Git repository is fetched.
-    locked_rev: Option<git2::Oid>,
+    ///
+    /// Expected to always be [`Revision::Locked`] after the Git repository is fetched.
+    locked_rev: Revision,
     /// The unique identifier of this source.
     source_id: SourceId,
     /// The underlying path source to discover packages inside the Git repository.
-    path_source: Option<PathSource<'cfg>>,
-    /// The identifer of this source for Cargo's Git cache directory.
+    ///
+    /// This gets set to `Some` after the git repo has been checked out
+    /// (automatically handled via [`GitSource::block_until_ready`]).
+    path_source: Option<RecursivePathSource<'gctx>>,
+    /// A short string that uniquely identifies the version of the checkout.
+    ///
+    /// This is typically a 7-character string of the OID hash, automatically
+    /// increasing in size if it is ambiguous.
+    ///
+    /// This is set to `Some` after the git repo has been checked out
+    /// (automatically handled via [`GitSource::block_until_ready`]).
+    short_id: Option<InternedString>,
+    /// The identifier of this source for Cargo's Git cache directory.
     /// See [`ident`] for more.
-    ident: String,
-    config: &'cfg Config,
+    ident: InternedString,
+    gctx: &'gctx GlobalContext,
     /// Disables status messages.
     quiet: bool,
 }
 
-impl<'cfg> GitSource<'cfg> {
+impl<'gctx> GitSource<'gctx> {
     /// Creates a git source for the given [`SourceId`].
-    pub fn new(source_id: SourceId, config: &'cfg Config) -> CargoResult<GitSource<'cfg>> {
+    pub fn new(source_id: SourceId, gctx: &'gctx GlobalContext) -> CargoResult<GitSource<'gctx>> {
         assert!(source_id.is_git(), "id is not git, id={}", source_id);
 
         let remote = GitRemote::new(source_id.url());
-        let manifest_reference = source_id.git_reference().unwrap().clone();
-        let locked_rev =
-            match source_id.precise() {
-                Some(s) => Some(git2::Oid::from_str(s).with_context(|| {
-                    format!("precise value for git is not a git revision: {}", s)
-                })?),
-                None => None,
-            };
+        // Fallback to git ref from manifest if there is no locked revision.
+        let locked_rev = source_id
+            .precise_git_fragment()
+            .map(|s| Revision::new(s.into()))
+            .unwrap_or_else(|| source_id.git_reference().unwrap().clone().into());
+
         let ident = ident_shallow(
             &source_id,
-            config
-                .cli_unstable()
-                .gitoxide
-                .map_or(false, |gix| gix.fetch && gix.shallow_deps),
+            gctx.cli_unstable()
+                .git
+                .map_or(false, |features| features.shallow_deps),
         );
 
         let source = GitSource {
             remote,
-            manifest_reference,
             locked_rev,
             source_id,
             path_source: None,
-            ident,
-            config,
+            short_id: None,
+            ident: ident.into(),
+            gctx,
             quiet: false,
         };
 
@@ -120,7 +135,7 @@ impl<'cfg> GitSource<'cfg> {
     }
 
     /// Returns the packages discovered by this source. It may fetch the Git
-    /// repository as well as walk the filesystem if package informations
+    /// repository as well as walk the filesystem if package information
     /// haven't yet updated.
     pub fn read_packages(&mut self) -> CargoResult<Vec<Package>> {
         if self.path_source.is_none() {
@@ -128,6 +143,54 @@ impl<'cfg> GitSource<'cfg> {
             self.block_until_ready()?;
         }
         self.path_source.as_mut().unwrap().read_packages()
+    }
+
+    fn mark_used(&self) -> CargoResult<()> {
+        self.gctx
+            .deferred_global_last_use()?
+            .mark_git_checkout_used(global_cache_tracker::GitCheckout {
+                encoded_git_name: self.ident,
+                short_name: self.short_id.expect("update before download"),
+                size: None,
+            });
+        Ok(())
+    }
+}
+
+/// Indicates a [Git revision] that might be locked or deferred to be resolved.
+///
+/// [Git revision]: https://git-scm.com/docs/revisions
+#[derive(Clone, Debug)]
+enum Revision {
+    /// A [Git reference] that would trigger extra fetches when being resolved.
+    ///
+    /// [Git reference]: https://git-scm.com/book/en/v2/Git-Internals-Git-References
+    Deferred(GitReference),
+    /// A locked revision of the actual Git commit object ID.
+    Locked(git2::Oid),
+}
+
+impl Revision {
+    fn new(rev: &str) -> Revision {
+        match rev_to_oid(rev) {
+            Some(oid) => Revision::Locked(oid),
+            None => Revision::Deferred(GitReference::Rev(rev.to_string())),
+        }
+    }
+}
+
+impl From<GitReference> for Revision {
+    fn from(value: GitReference) -> Self {
+        Revision::Deferred(value)
+    }
+}
+
+impl From<Revision> for GitReference {
+    fn from(value: Revision) -> Self {
+        match value {
+            Revision::Deferred(git_ref) => git_ref,
+            Revision::Locked(oid) => GitReference::Rev(oid.to_string()),
+        }
     }
 }
 
@@ -160,26 +223,25 @@ fn ident_shallow(id: &SourceId, is_shallow: bool) -> String {
     ident
 }
 
-impl<'cfg> Debug for GitSource<'cfg> {
+impl<'gctx> Debug for GitSource<'gctx> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "git repo at {}", self.remote.url())?;
-
-        // TODO(-Znext-lockfile-bump): set it to true when stabilizing
-        // lockfile v4, because we want Source ID serialization to be
-        // consistent with lockfile.
-        match self.manifest_reference.pretty_ref(false) {
-            Some(s) => write!(f, " ({})", s),
-            None => Ok(()),
+        match &self.locked_rev {
+            Revision::Deferred(git_ref) => match git_ref.pretty_ref(true) {
+                Some(s) => write!(f, " ({})", s),
+                None => Ok(()),
+            },
+            Revision::Locked(oid) => write!(f, " ({oid})"),
         }
     }
 }
 
-impl<'cfg> Source for GitSource<'cfg> {
+impl<'gctx> Source for GitSource<'gctx> {
     fn query(
         &mut self,
         dep: &Dependency,
         kind: QueryKind,
-        f: &mut dyn FnMut(Summary),
+        f: &mut dyn FnMut(IndexSummary),
     ) -> Poll<CargoResult<()>> {
         if let Some(src) = self.path_source.as_mut() {
             src.query(dep, kind, f)
@@ -202,14 +264,17 @@ impl<'cfg> Source for GitSource<'cfg> {
 
     fn block_until_ready(&mut self) -> CargoResult<()> {
         if self.path_source.is_some() {
+            self.mark_used()?;
             return Ok(());
         }
 
-        let git_fs = self.config.git_path();
+        let git_fs = self.gctx.git_path();
         // Ignore errors creating it, in case this is a read-only filesystem:
         // perhaps the later operations can succeed anyhow.
         let _ = git_fs.create_dir();
-        let git_path = self.config.assert_package_cache_locked(&git_fs);
+        let git_path = self
+            .gctx
+            .assert_package_cache_locked(CacheLockMode::DownloadExclusive, &git_fs);
 
         // Before getting a checkout, make sure that `<cargo_home>/git` is
         // marked as excluded from indexing and backups. Older versions of Cargo
@@ -221,19 +286,21 @@ impl<'cfg> Source for GitSource<'cfg> {
         // exists.
         exclude_from_backups_and_indexing(&git_path);
 
-        let db_path = git_path.join("db").join(&self.ident);
+        let db_path = self.gctx.git_db_path().join(&self.ident);
+        let db_path = db_path.into_path_unlocked();
 
         let db = self.remote.db_at(&db_path).ok();
-        let (db, actual_rev) = match (self.locked_rev, db) {
+
+        let (db, actual_rev) = match (&self.locked_rev, db) {
             // If we have a locked revision, and we have a preexisting database
             // which has that revision, then no update needs to happen.
-            (Some(rev), Some(db)) if db.contains(rev) => (db, rev),
+            (Revision::Locked(oid), Some(db)) if db.contains(*oid) => (db, *oid),
 
             // If we're in offline mode, we're not locked, and we have a
             // database, then try to resolve our reference with the preexisting
             // repository.
-            (None, Some(db)) if self.config.offline() => {
-                let rev = db.resolve(&self.manifest_reference).with_context(|| {
+            (Revision::Deferred(git_ref), Some(db)) if self.gctx.offline() => {
+                let rev = db.resolve(&git_ref).with_context(|| {
                     "failed to lookup reference in preexisting repository, and \
                          can't check for updates in offline mode (--offline)"
                 })?;
@@ -245,14 +312,15 @@ impl<'cfg> Source for GitSource<'cfg> {
             // situation that we have a locked revision but the database
             // doesn't have it.
             (locked_rev, db) => {
-                if self.config.offline() {
+                if self.gctx.offline() {
                     anyhow::bail!(
                         "can't checkout from '{}': you are in the offline mode (--offline)",
                         self.remote.url()
                     );
                 }
+
                 if !self.quiet {
-                    self.config.shell().status(
+                    self.gctx.shell().status(
                         "Updating",
                         format!("git repository `{}`", self.remote.url()),
                     )?;
@@ -260,13 +328,8 @@ impl<'cfg> Source for GitSource<'cfg> {
 
                 trace!("updating git source `{:?}`", self.remote);
 
-                self.remote.checkout(
-                    &db_path,
-                    db,
-                    &self.manifest_reference,
-                    locked_rev,
-                    self.config,
-                )?
+                let locked_rev = locked_rev.clone().into();
+                self.remote.checkout(&db_path, db, &locked_rev, self.gctx)?
             }
         };
 
@@ -278,18 +341,26 @@ impl<'cfg> Source for GitSource<'cfg> {
         // Check out `actual_rev` from the database to a scoped location on the
         // filesystem. This will use hard links and such to ideally make the
         // checkout operation here pretty fast.
-        let checkout_path = git_path
-            .join("checkouts")
+        let checkout_path = self
+            .gctx
+            .git_checkouts_path()
             .join(&self.ident)
             .join(short_id.as_str());
-        db.copy_to(actual_rev, &checkout_path, self.config)?;
+        let checkout_path = checkout_path.into_path_unlocked();
+        db.copy_to(actual_rev, &checkout_path, self.gctx)?;
 
-        let source_id = self.source_id.with_precise(Some(actual_rev.to_string()));
-        let path_source = PathSource::new_recursive(&checkout_path, source_id, self.config);
+        let source_id = self
+            .source_id
+            .with_git_precise(Some(actual_rev.to_string()));
+        let path_source = RecursivePathSource::new(&checkout_path, source_id, self.gctx);
 
         self.path_source = Some(path_source);
-        self.locked_rev = Some(actual_rev);
-        self.path_source.as_mut().unwrap().update()
+        self.short_id = Some(short_id.as_str().into());
+        self.locked_rev = Revision::Locked(actual_rev);
+        self.path_source.as_mut().unwrap().load()?;
+
+        self.mark_used()?;
+        Ok(())
     }
 
     fn download(&mut self, id: PackageId) -> CargoResult<MaybePackage> {
@@ -298,6 +369,7 @@ impl<'cfg> Source for GitSource<'cfg> {
             id,
             self.remote
         );
+        self.mark_used()?;
         self.path_source
             .as_mut()
             .expect("BUG: `update()` must be called before `get()`")
@@ -309,7 +381,10 @@ impl<'cfg> Source for GitSource<'cfg> {
     }
 
     fn fingerprint(&self, _pkg: &Package) -> CargoResult<String> {
-        Ok(self.locked_rev.as_ref().unwrap().to_string())
+        match &self.locked_rev {
+            Revision::Locked(oid) => Ok(oid.to_string()),
+            _ => unreachable!("locked_rev must be resolved when computing fingerprint"),
+        }
     }
 
     fn describe(&self) -> String {
